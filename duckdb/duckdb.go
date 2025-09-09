@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/marcboeker/go-duckdb"
@@ -42,13 +43,31 @@ type DuckDBSink struct {
 
 var _ streams.Sink = (*DuckDBSink)(nil)
 
+// Object pools for reducing memory allocations
+var (
+	stringSlicePool = sync.Pool{
+		New: func() any { return make([]string, 0, 16) },
+	}
+	stringBuilderPool = sync.Pool{
+		New: func() any { return &strings.Builder{} },
+	}
+	interfaceSlicePool = sync.Pool{
+		New: func() any { return make([]any, 0, 16) },
+	}
+)
+
 // quoteIdentifier quotes SQL identifiers using DuckDB's double-quote syntax.
 func quoteIdentifier(identifier string) string {
 	if !strings.Contains(identifier, `"`) {
 		return `"` + identifier + `"`
 	}
 
-	var builder strings.Builder
+	builder := stringBuilderPool.Get().(*strings.Builder)
+	defer func() {
+		builder.Reset()
+		stringBuilderPool.Put(builder)
+	}()
+
 	builder.Grow(len(identifier) + 2)
 	builder.WriteByte('"')
 
@@ -202,9 +221,25 @@ func (d *DuckDBSink) insertRecordSimple(record Record) error {
 		return fmt.Errorf("empty record")
 	}
 
-	columns := make([]string, 0, recordLen)
-	placeholders := make([]string, 0, recordLen)
-	values := make([]any, 0, recordLen)
+	columns := stringSlicePool.Get().([]string)[:0]
+	placeholders := stringSlicePool.Get().([]string)[:0]
+	values := interfaceSlicePool.Get().([]any)[:0]
+
+	defer func() {
+		stringSlicePool.Put(columns[:0])
+		stringSlicePool.Put(placeholders[:0])
+		interfaceSlicePool.Put(values[:0])
+	}()
+
+	if cap(columns) < recordLen {
+		columns = make([]string, 0, recordLen)
+	}
+	if cap(placeholders) < recordLen {
+		placeholders = make([]string, 0, recordLen)
+	}
+	if cap(values) < recordLen {
+		values = make([]any, 0, recordLen)
+	}
 
 	for col, val := range record {
 		columns = append(columns, quoteIdentifier(col))
@@ -304,14 +339,25 @@ func (d *DuckDBSink) insertBatchOptimized(tx *sql.Tx) error {
 
 	firstRecord := d.buffer[0]
 	firstLen := len(firstRecord)
-	firstColumns := make([]string, 0, firstLen)
+	firstColumns := stringSlicePool.Get().([]string)[:0]
+	recordColumns := stringSlicePool.Get().([]string)[:0]
+
+	defer func() {
+		stringSlicePool.Put(firstColumns[:0])
+		stringSlicePool.Put(recordColumns[:0])
+	}()
+
+	if cap(firstColumns) < firstLen {
+		firstColumns = make([]string, 0, firstLen)
+	}
+	if cap(recordColumns) < firstLen {
+		recordColumns = make([]string, 0, firstLen)
+	}
 
 	for col := range firstRecord {
 		firstColumns = append(firstColumns, col)
 	}
 	sort.Strings(firstColumns)
-
-	recordColumns := make([]string, 0, firstLen)
 	allSameSchema := true
 
 	for _, record := range d.buffer[1:] {
@@ -359,9 +405,25 @@ func (d *DuckDBSink) insertBatchMultiRow(tx *sql.Tx, columns []string) error {
 	bufferLen := len(d.buffer)
 	columnsLen := len(columns)
 	quotedColumns := make([]string, columnsLen)
-	allPlaceholders := make([]string, 0, bufferLen)
-	allValues := make([]any, 0, bufferLen*columnsLen)
-	rowPlaceholders := make([]string, 0, columnsLen)
+	allPlaceholders := stringSlicePool.Get().([]string)[:0]
+	allValues := interfaceSlicePool.Get().([]any)[:0]
+	rowPlaceholders := stringSlicePool.Get().([]string)[:0]
+
+	defer func() {
+		stringSlicePool.Put(allPlaceholders[:0])
+		interfaceSlicePool.Put(allValues[:0])
+		stringSlicePool.Put(rowPlaceholders[:0])
+	}()
+
+	if cap(allPlaceholders) < bufferLen {
+		allPlaceholders = make([]string, 0, bufferLen)
+	}
+	if cap(allValues) < bufferLen*columnsLen {
+		allValues = make([]any, 0, bufferLen*columnsLen)
+	}
+	if cap(rowPlaceholders) < columnsLen {
+		rowPlaceholders = make([]string, 0, columnsLen)
+	}
 
 	for i, col := range columns {
 		quotedColumns[i] = quoteIdentifier(col)
@@ -396,9 +458,25 @@ func (d *DuckDBSink) insertRecordInTransaction(tx *sql.Tx, record Record) error 
 	}
 
 	recordLen := len(record)
-	columns := make([]string, 0, recordLen)
-	placeholders := make([]string, 0, recordLen)
-	values := make([]any, 0, recordLen)
+	columns := stringSlicePool.Get().([]string)[:0]
+	placeholders := stringSlicePool.Get().([]string)[:0]
+	values := interfaceSlicePool.Get().([]any)[:0]
+
+	defer func() {
+		stringSlicePool.Put(columns[:0])
+		stringSlicePool.Put(placeholders[:0])
+		interfaceSlicePool.Put(values[:0])
+	}()
+
+	if cap(columns) < recordLen {
+		columns = make([]string, 0, recordLen)
+	}
+	if cap(placeholders) < recordLen {
+		placeholders = make([]string, 0, recordLen)
+	}
+	if cap(values) < recordLen {
+		values = make([]any, 0, recordLen)
+	}
 
 	for col, val := range record {
 		columns = append(columns, quoteIdentifier(col))
