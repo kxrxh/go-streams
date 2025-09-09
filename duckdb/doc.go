@@ -30,9 +30,12 @@
 //	}
 //
 //	config := duckdb.SinkConfig{
-//		TableName:  "events",
-//		BatchSize:  100,    // Batch every 100 records
-//		MaxRetries: 3,      // Retry failed operations up to 3 times
+//		TableName:         "events",
+//		BatchSize:         100,                    // Batch every 100 records
+//		MaxRetries:        3,                      // Retry failed operations up to 3 times
+//		ChannelCapacity:   200,                    // Input channel capacity (BatchSize*2 default)
+//		InitialRetryDelay: 100 * time.Millisecond, // Initial retry delay (100ms default)
+//		MaxRetryDelay:     30 * time.Second,       // Maximum retry delay (30s default)
 //	}
 //
 //	sink := duckdb.NewSink(context.Background(), db, config, slog.Default())

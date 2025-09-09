@@ -6,104 +6,81 @@ import (
 	"log/slog"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/reugn/go-streams"
 )
 
 func TestDuckDBSink_Interface(t *testing.T) {
-	// Create a temporary database file path for testing
 	tmpFile, err := os.CreateTemp("", "duckdb_test_*.db")
 	if err != nil {
 		t.Fatal(err)
 	}
 	tmpFile.Close()
-	// Remove the file so DuckDB can create it fresh
 	os.Remove(tmpFile.Name())
 	defer os.Remove(tmpFile.Name())
 
-	// Open database connection
 	db, err := sql.Open("duckdb", tmpFile.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 
-	// Create table manually
 	_, err = db.Exec("CREATE TABLE test_table (id INTEGER)")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	config := SinkConfig{
-		TableName: "test_table",
-	}
-
+	config := SinkConfig{TableName: "test_table"}
 	sink := NewSink(context.Background(), db, config, nil)
 	if sink == nil {
 		t.Fatal("NewSink returned nil")
 	}
 
-	// Test interface compliance
+	// Verify Sink interface compliance
 	var _ streams.Sink = sink
 
-	// Test channels
 	in := sink.In()
 	if in == nil {
 		t.Error("In() returned nil channel")
 	}
 
-	// Close input channel to trigger completion
 	close(in)
 	sink.AwaitCompletion()
 }
 
 func TestDuckDBSink_BasicInsert(t *testing.T) {
-	// Create a temporary database file path for testing
 	tmpFile, err := os.CreateTemp("", "duckdb_test_*.db")
 	if err != nil {
 		t.Fatal(err)
 	}
 	tmpFile.Close()
-	// Remove the file so DuckDB can create it fresh
 	os.Remove(tmpFile.Name())
 	defer os.Remove(tmpFile.Name())
 
-	// Open database connection
 	db, err := sql.Open("duckdb", tmpFile.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 
-	// Create table manually
 	_, err = db.Exec("CREATE TABLE test_table (id INTEGER, name VARCHAR, value DOUBLE)")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	config := SinkConfig{
-		TableName: "test_table",
-	}
-
+	config := SinkConfig{TableName: "test_table"}
 	sink := NewSink(context.Background(), db, config, slog.Default())
 	if sink == nil {
 		t.Fatal("NewSink returned nil")
 	}
 
-	// Test inserting a record
-	record := Record{
-		"id":    1,
-		"name":  "test",
-		"value": 42.5,
-	}
-
+	record := Record{"id": 1, "name": "test", "value": 42.5}
 	sink.In() <- record
-
-	// Close and wait for completion
 	close(sink.In())
 	sink.AwaitCompletion()
 
-	// Verify the record was inserted
+	// Verify single record insertion
 	var count int
 	err = db.QueryRow("SELECT COUNT(*) FROM test_table").Scan(&count)
 	if err != nil {
@@ -113,7 +90,6 @@ func TestDuckDBSink_BasicInsert(t *testing.T) {
 		t.Errorf("Expected 1 record, got %d", count)
 	}
 
-	// Verify the record content
 	var id int
 	var name string
 	var value float64
@@ -127,40 +103,31 @@ func TestDuckDBSink_BasicInsert(t *testing.T) {
 }
 
 func TestDuckDBSink_BatchInsert(t *testing.T) {
-	// Create a temporary database file path for testing
 	tmpFile, err := os.CreateTemp("", "duckdb_test_*.db")
 	if err != nil {
 		t.Fatal(err)
 	}
 	tmpFile.Close()
-	// Remove the file so DuckDB can create it fresh
 	os.Remove(tmpFile.Name())
 	defer os.Remove(tmpFile.Name())
 
-	// Open database connection
 	db, err := sql.Open("duckdb", tmpFile.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 
-	// Create table manually
 	_, err = db.Exec("CREATE TABLE test_table (id INTEGER, value VARCHAR)")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	config := SinkConfig{
-		TableName: "test_table",
-		BatchSize: 3,
-	}
-
+	config := SinkConfig{TableName: "test_table", BatchSize: 3}
 	sink := NewSink(context.Background(), db, config, slog.Default())
 	if sink == nil {
 		t.Fatal("NewSink returned nil")
 	}
 
-	// Send multiple records
 	records := []Record{
 		{"id": 1, "value": "first"},
 		{"id": 2, "value": "second"},
@@ -171,12 +138,10 @@ func TestDuckDBSink_BatchInsert(t *testing.T) {
 	for _, record := range records {
 		sink.In() <- record
 	}
-
-	// Close and wait for completion
 	close(sink.In())
 	sink.AwaitCompletion()
 
-	// Verify all records were inserted
+	// Verify batch processing with overflow
 	var count int
 	err = db.QueryRow("SELECT COUNT(*) FROM test_table").Scan(&count)
 	if err != nil {
@@ -186,20 +151,13 @@ func TestDuckDBSink_BatchInsert(t *testing.T) {
 		t.Errorf("Expected 4 records, got %d", count)
 	}
 
-	// Verify specific records
 	rows, err := db.Query("SELECT id, value FROM test_table ORDER BY id")
 	if err != nil {
 		t.Fatalf("Failed to query records: %v", err)
 	}
 	defer rows.Close()
 
-	expected := map[int]string{
-		1: "first",
-		2: "second",
-		3: "third",
-		4: "fourth",
-	}
-
+	expected := map[int]string{1: "first", 2: "second", 3: "third", 4: "fourth"}
 	i := 0
 	for rows.Next() {
 		var id int
@@ -219,7 +177,6 @@ func TestDuckDBSink_BatchInsert(t *testing.T) {
 }
 
 func TestDuckDBSink_NilPointers(t *testing.T) {
-	// Create a temporary database file path for testing
 	tmpFile, err := os.CreateTemp("", "duckdb_test_*.db")
 	if err != nil {
 		t.Fatal(err)
@@ -228,56 +185,38 @@ func TestDuckDBSink_NilPointers(t *testing.T) {
 	os.Remove(tmpFile.Name())
 	defer os.Remove(tmpFile.Name())
 
-	// Open database connection
 	db, err := sql.Open("duckdb", tmpFile.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 
-	// Create table manually
 	_, err = db.Exec("CREATE TABLE test_table (id INTEGER, name VARCHAR, optional BOOLEAN)")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	config := SinkConfig{
-		TableName: "test_table",
-	}
-
+	config := SinkConfig{TableName: "test_table"}
 	sink := NewSink(context.Background(), db, config, slog.Default())
 	if sink == nil {
 		t.Fatal("NewSink returned nil")
 	}
 
+	// Test handling of nil pointer values
 	type TestStructWithPointers struct {
 		ID       *int    `json:"id"`
 		Name     *string `json:"name"`
 		Optional *bool   `json:"optional"`
 	}
 
-	// Test with nil pointers
-	input := TestStructWithPointers{
-		ID:       nil,
-		Name:     nil,
-		Optional: nil,
-	}
-
-	// Convert struct to Record (map[string]any) as expected by the sink
-	record := Record{
-		"id":       input.ID,
-		"name":     input.Name,
-		"optional": input.Optional,
-	}
+	input := TestStructWithPointers{ID: nil, Name: nil, Optional: nil}
+	record := Record{"id": input.ID, "name": input.Name, "optional": input.Optional}
 	sink.In() <- record
-
-	// Close and wait for completion
 	close(sink.In())
 	sink.AwaitCompletion()
 }
 
 func TestDuckDBSink_EmptyStruct(t *testing.T) {
-	// Create a temporary database file path for testing
 	tmpFile, err := os.CreateTemp("", "duckdb_test_*.db")
 	if err != nil {
 		t.Fatal(err)
@@ -286,39 +225,29 @@ func TestDuckDBSink_EmptyStruct(t *testing.T) {
 	os.Remove(tmpFile.Name())
 	defer os.Remove(tmpFile.Name())
 
-	// Open database connection
 	db, err := sql.Open("duckdb", tmpFile.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 
-	// Create table manually
 	_, err = db.Exec("CREATE TABLE test_table (id INTEGER)")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	config := SinkConfig{
-		TableName: "test_table",
-	}
-
+	config := SinkConfig{TableName: "test_table"}
 	sink := NewSink(context.Background(), db, config, slog.Default())
 	if sink == nil {
 		t.Fatal("NewSink returned nil")
 	}
 
-	type EmptyStruct struct{}
-
-	// Convert empty struct to empty Record (map[string]any) as expected by the sink
+	// Test rejection of empty records
 	record := Record{}
 	sink.In() <- record
-
-	// Close and wait for completion
 	close(sink.In())
 	sink.AwaitCompletion()
 
-	// Verify no records were inserted (empty record should be rejected)
 	var count int
 	err = db.QueryRow("SELECT COUNT(*) FROM test_table").Scan(&count)
 	if err != nil {
@@ -330,7 +259,6 @@ func TestDuckDBSink_EmptyStruct(t *testing.T) {
 }
 
 func TestDuckDBSink_ErrorChannel(t *testing.T) {
-	// Create a temporary database file path for testing
 	tmpFile, err := os.CreateTemp("", "duckdb_test_*.db")
 	if err != nil {
 		t.Fatal(err)
@@ -339,44 +267,34 @@ func TestDuckDBSink_ErrorChannel(t *testing.T) {
 	os.Remove(tmpFile.Name())
 	defer os.Remove(tmpFile.Name())
 
-	// Open database connection
 	db, err := sql.Open("duckdb", tmpFile.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 
-	// Create table manually
 	_, err = db.Exec("CREATE TABLE test_table (id INTEGER)")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	config := SinkConfig{
-		TableName:          "test_table",
-		EnableErrorChannel: true,
-	}
-
+	config := SinkConfig{TableName: "test_table", EnableErrorChannel: true}
 	sink := NewSink(context.Background(), db, config, slog.Default())
 	if sink == nil {
 		t.Fatal("NewSink returned nil")
 	}
 
-	// Test that error channel is available
+	// Verify error channel functionality
 	errChan := sink.Errors()
 	if errChan == nil {
 		t.Error("Expected error channel to be available, got nil")
 	}
 
-	// Send an empty record which should cause an error
 	record := Record{}
 	sink.In() <- record
-
-	// Close and wait for completion
 	close(sink.In())
 	sink.AwaitCompletion()
 
-	// Check if error was sent to channel
 	select {
 	case err := <-errChan:
 		if err == nil {
@@ -390,7 +308,6 @@ func TestDuckDBSink_ErrorChannel(t *testing.T) {
 }
 
 func TestDuckDBSink_SpecialCharactersInNames(t *testing.T) {
-	// Create a temporary database file path for testing
 	tmpFile, err := os.CreateTemp("", "duckdb_test_*.db")
 	if err != nil {
 		t.Fatal(err)
@@ -399,29 +316,24 @@ func TestDuckDBSink_SpecialCharactersInNames(t *testing.T) {
 	os.Remove(tmpFile.Name())
 	defer os.Remove(tmpFile.Name())
 
-	// Open database connection
 	db, err := sql.Open("duckdb", tmpFile.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 
-	// Create table manually with quoted name
 	_, err = db.Exec(`CREATE TABLE "test-table" ("user-id" INTEGER, "user.name" VARCHAR, "user+tag" VARCHAR, "user_tag" VARCHAR)`)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	config := SinkConfig{
-		TableName: "test-table", // Special characters in table name
-	}
-
+	config := SinkConfig{TableName: "test-table"}
 	sink := NewSink(context.Background(), db, config, slog.Default())
 	if sink == nil {
 		t.Fatal("NewSink returned nil")
 	}
 
-	// Test with special characters in field names
+	// Test SQL identifier quoting with special characters
 	record := Record{
 		"user-id":   1,
 		"user.name": "test@example.com",
@@ -430,14 +342,11 @@ func TestDuckDBSink_SpecialCharactersInNames(t *testing.T) {
 	}
 
 	sink.In() <- record
-
-	// Close and wait for completion
 	close(sink.In())
 	sink.AwaitCompletion()
 }
 
-func TestDuckDBSink_ContextCancellation(t *testing.T) {
-	// Create a temporary database file path for testing
+func TestDuckDBSink_ConfigurableChannelCapacity(t *testing.T) {
 	tmpFile, err := os.CreateTemp("", "duckdb_test_*.db")
 	if err != nil {
 		t.Fatal(err)
@@ -446,25 +355,87 @@ func TestDuckDBSink_ContextCancellation(t *testing.T) {
 	os.Remove(tmpFile.Name())
 	defer os.Remove(tmpFile.Name())
 
-	// Open database connection
 	db, err := sql.Open("duckdb", tmpFile.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 
-	// Create table manually
 	_, err = db.Exec("CREATE TABLE test_table (id INTEGER, name VARCHAR)")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	config := SinkConfig{
-		TableName: "test_table",
-		BatchSize: 10, // Use batching to test buffer flushing on cancellation
+	// Test custom channel capacity configuration
+	config := SinkConfig{TableName: "test_table", ChannelCapacity: 50}
+	sink := NewSink(context.Background(), db, config, slog.Default())
+	if sink == nil {
+		t.Fatal("NewSink returned nil")
 	}
 
-	// Create a cancellable context
+	records := []Record{{"id": 1, "name": "test1"}, {"id": 2, "name": "test2"}}
+	for _, record := range records {
+		sink.In() <- record
+	}
+	close(sink.In())
+	sink.AwaitCompletion()
+
+	var count int
+	err = db.QueryRow("SELECT COUNT(*) FROM test_table").Scan(&count)
+	if err != nil {
+		t.Fatalf("Failed to count records: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("Expected 2 records, got %d", count)
+	}
+}
+
+func TestDuckDBSink_ExponentialBackoff(t *testing.T) {
+	// Test exponential backoff calculation
+	testCases := []struct {
+		attempt       int
+		initialDelay  time.Duration
+		maxDelay      time.Duration
+		expectedDelay time.Duration
+	}{
+		{1, 100 * time.Millisecond, 30 * time.Second, 100 * time.Millisecond},
+		{2, 100 * time.Millisecond, 30 * time.Second, 200 * time.Millisecond},
+		{3, 100 * time.Millisecond, 30 * time.Second, 400 * time.Millisecond},
+		{4, 100 * time.Millisecond, 30 * time.Second, 800 * time.Millisecond},
+		{10, 100 * time.Millisecond, 30 * time.Second, 30 * time.Second}, // capped at max
+	}
+
+	for _, tc := range testCases {
+		actualDelay := calculateRetryDelay(tc.attempt, tc.initialDelay, tc.maxDelay)
+		if actualDelay != tc.expectedDelay {
+			t.Errorf("calculateRetryDelay(%d, %v, %v) = %v, expected %v",
+				tc.attempt, tc.initialDelay, tc.maxDelay, actualDelay, tc.expectedDelay)
+		}
+	}
+}
+
+func TestDuckDBSink_ContextCancellation(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "duckdb_test_*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+	os.Remove(tmpFile.Name())
+	defer os.Remove(tmpFile.Name())
+
+	db, err := sql.Open("duckdb", tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec("CREATE TABLE test_table (id INTEGER, name VARCHAR)")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Test graceful shutdown via context cancellation
+	config := SinkConfig{TableName: "test_table", BatchSize: 10}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -474,21 +445,12 @@ func TestDuckDBSink_ContextCancellation(t *testing.T) {
 	}
 	defer sink.AwaitCompletion()
 
-	// Send a few records
+	// Send records before cancellation
 	for i := 0; i < 5; i++ {
-		record := Record{
-			"id":   i,
-			"name": "test",
-		}
-		sink.In() <- record
+		sink.In() <- Record{"id": i, "name": "test"}
 	}
 
-	// Cancel the context (simulating graceful shutdown)
 	cancel()
-
-	// Close the input channel
 	close(sink.In())
-
-	// Wait for completion - should handle cancellation gracefully
 	sink.AwaitCompletion()
 }

@@ -17,10 +17,13 @@ import (
 
 // SinkConfig holds configuration for the DuckDB sink.
 type SinkConfig struct {
-	TableName          string // Target table name
-	BatchSize          int    // Records per batch (1 = no batching)
-	MaxRetries         int    // Max retry attempts (3 default)
-	EnableErrorChannel bool   // Enable error reporting channel
+	TableName          string        // Target table name
+	BatchSize          int           // Records per batch (1 = no batching)
+	MaxRetries         int           // Max retry attempts (3 default)
+	EnableErrorChannel bool          // Enable error reporting channel
+	ChannelCapacity    int           // Input channel capacity (BatchSize*2 default)
+	InitialRetryDelay  time.Duration // Initial delay for retry backoff (100ms default)
+	MaxRetryDelay      time.Duration // Maximum delay for retry backoff (30s default)
 }
 
 // Record represents a database row as column-value pairs.
@@ -82,6 +85,24 @@ func quoteIdentifier(identifier string) string {
 	return builder.String()
 }
 
+// calculateRetryDelay computes exponential backoff delay with jitter.
+// Uses exponential backoff: initialDelay * 2^(attempt-1), capped at maxDelay.
+func calculateRetryDelay(attempt int, initialDelay, maxDelay time.Duration) time.Duration {
+	if attempt <= 1 {
+		return initialDelay
+	}
+
+	// Calculate exponential delay: initialDelay * 2^(attempt-1)
+	delay := initialDelay * time.Duration(1<<(attempt-1))
+
+	// Cap at maximum delay
+	if delay > maxDelay {
+		delay = maxDelay
+	}
+
+	return delay
+}
+
 // NewSink creates a new DuckDB sink.
 // Caller must manage the database connection.
 // Uses context.Background() if ctx is nil.
@@ -105,6 +126,15 @@ func NewSink(ctx context.Context, db *sql.DB, config SinkConfig, logger ...*slog
 	if config.MaxRetries < 1 {
 		config.MaxRetries = 3
 	}
+	if config.ChannelCapacity < 1 {
+		config.ChannelCapacity = config.BatchSize * 2
+	}
+	if config.InitialRetryDelay <= 0 {
+		config.InitialRetryDelay = 100 * time.Millisecond
+	}
+	if config.MaxRetryDelay <= 0 {
+		config.MaxRetryDelay = 30 * time.Second
+	}
 
 	if ctx == nil {
 		ctx = context.Background()
@@ -114,7 +144,7 @@ func NewSink(ctx context.Context, db *sql.DB, config SinkConfig, logger ...*slog
 	sink := &DuckDBSink{
 		db:     db,
 		config: config,
-		in:     make(chan any, config.BatchSize*2),
+		in:     make(chan any, config.ChannelCapacity),
 		done:   make(chan struct{}),
 		logger: log,
 		ctx:    ctx,
@@ -261,10 +291,12 @@ func (d *DuckDBSink) insertRecordSimple(record Record) error {
 
 		lastErr = err
 		if attempt < d.config.MaxRetries {
+			delay := calculateRetryDelay(attempt+1, d.config.InitialRetryDelay, d.config.MaxRetryDelay)
 			d.logger.Warn("Insert failed, retrying",
 				slog.Int("attempt", attempt+1),
+				slog.Duration("retry_delay", delay),
 				slog.Any("error", err))
-			time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
+			time.Sleep(delay)
 		}
 	}
 
@@ -285,10 +317,12 @@ func (d *DuckDBSink) flushBuffer() error {
 		if err != nil {
 			lastErr = fmt.Errorf("failed to begin transaction: %w", err)
 			if attempt < d.config.MaxRetries {
+				delay := calculateRetryDelay(attempt+1, d.config.InitialRetryDelay, d.config.MaxRetryDelay)
 				d.logger.Warn("Batch transaction begin failed, retrying",
 					slog.Int("attempt", attempt+1),
+					slog.Duration("retry_delay", delay),
 					slog.Any("error", err))
-				time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
+				time.Sleep(delay)
 				continue
 			}
 			return lastErr
@@ -299,10 +333,12 @@ func (d *DuckDBSink) flushBuffer() error {
 		if batchErr != nil {
 			lastErr = batchErr
 			if attempt < d.config.MaxRetries {
+				delay := calculateRetryDelay(attempt+1, d.config.InitialRetryDelay, d.config.MaxRetryDelay)
 				d.logger.Warn("Batch insert failed, retrying",
 					slog.Int("attempt", attempt+1),
+					slog.Duration("retry_delay", delay),
 					slog.Any("error", batchErr))
-				time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
+				time.Sleep(delay)
 				continue
 			}
 			return fmt.Errorf("failed to flush batch after %d attempts: %w", d.config.MaxRetries+1, lastErr)
@@ -311,10 +347,12 @@ func (d *DuckDBSink) flushBuffer() error {
 		if err := tx.Commit(); err != nil {
 			lastErr = fmt.Errorf("failed to commit transaction: %w", err)
 			if attempt < d.config.MaxRetries {
+				delay := calculateRetryDelay(attempt+1, d.config.InitialRetryDelay, d.config.MaxRetryDelay)
 				d.logger.Warn("Batch commit failed, retrying",
 					slog.Int("attempt", attempt+1),
+					slog.Duration("retry_delay", delay),
 					slog.Any("error", err))
-				time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
+				time.Sleep(delay)
 				continue
 			}
 			return fmt.Errorf("failed to commit batch after %d attempts: %w", d.config.MaxRetries+1, lastErr)
