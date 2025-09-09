@@ -10,7 +10,7 @@
 //		"context"
 //		"database/sql"
 //		"log/slog"
-//	
+//
 //		"github.com/reugn/go-streams"
 //		"github.com/reugn/go-streams/duckdb"
 //		_ "github.com/marcboeker/go-duckdb"
@@ -22,7 +22,7 @@
 //		log.Fatal(err)
 //	}
 //	defer db.Close()
-//	
+//
 //	// Create table if it doesn't exist
 //	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS events (id INTEGER, data VARCHAR)`)
 //	if err != nil {

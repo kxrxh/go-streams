@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,6 +24,9 @@ type SinkConfig struct {
 	// MaxRetries specifies the maximum number of retries for failed operations.
 	// Default is 3.
 	MaxRetries int
+	// EnableErrorChannel enables error reporting through an error channel.
+	// Default is false.
+	EnableErrorChannel bool
 }
 
 // Record represents a single record to be inserted into DuckDB.
@@ -42,6 +47,9 @@ type DuckDBSink struct {
 
 	// batching fields
 	buffer []Record
+
+	// error reporting
+	errChan chan error
 }
 
 var _ streams.Sink = (*DuckDBSink)(nil)
@@ -66,7 +74,12 @@ func NewSink(ctx context.Context, db *sql.DB, config SinkConfig, logger ...*slog
 			slog.String("name", "duckdb"),
 			slog.String("type", "sink")))
 	} else {
-		log = slog.New(slog.DiscardHandler) // Disabled logger by default
+		// Use a default logger that writes to stderr with INFO level
+		log = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+			Level: slog.LevelInfo,
+		})).With(slog.Group("connector",
+			slog.String("name", "duckdb"),
+			slog.String("type", "sink")))
 	}
 
 	// Set defaults
@@ -97,6 +110,10 @@ func NewSink(ctx context.Context, db *sql.DB, config SinkConfig, logger ...*slog
 		sink.buffer = make([]Record, 0, config.BatchSize)
 	}
 
+	if config.EnableErrorChannel {
+		sink.errChan = make(chan error, 1) // Buffered channel to avoid blocking
+	}
+
 	// Start processing incoming data
 	go sink.processStream()
 
@@ -112,19 +129,41 @@ func (d *DuckDBSink) processStream() {
 		case msg, ok := <-d.in:
 			if !ok {
 				// Channel closed, flush remaining records and exit
-				d.flushBuffer()
+				if err := d.flushBuffer(); err != nil && d.errChan != nil {
+					select {
+					case d.errChan <- err:
+					default:
+					}
+				}
 				return
 			}
 			if err := d.processMessage(msg); err != nil {
 				d.logger.Error("Failed to process message", slog.Any("error", err))
+				// Send error to channel if enabled
+				if d.errChan != nil {
+					select {
+					case d.errChan <- err:
+					default:
+					}
+				}
 				// Stop on first error for simplicity
-				d.flushBuffer()
+				if flushErr := d.flushBuffer(); flushErr != nil && d.errChan != nil {
+					select {
+					case d.errChan <- flushErr:
+					default:
+					}
+				}
 				return
 			}
 		case <-d.ctx.Done():
 			d.logger.Info("Context cancelled, stopping processing", slog.Any("error", d.ctx.Err()))
 			// Flush any remaining records before exiting
-			d.flushBuffer()
+			if err := d.flushBuffer(); err != nil && d.errChan != nil {
+				select {
+				case d.errChan <- err:
+				default:
+				}
+			}
 			return
 		}
 	}
@@ -216,27 +255,161 @@ func (d *DuckDBSink) flushBuffer() error {
 
 	d.logger.Debug("Flushing batch", slog.Int("size", len(d.buffer)))
 
-	// Use transaction for atomic batch operations
-	tx, err := d.db.Begin()
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
+	// Retry logic for batch operations
+	var lastErr error
+	for attempt := 0; attempt <= d.config.MaxRetries; attempt++ {
+		// Use transaction for atomic batch operations
+		tx, err := d.db.Begin()
+		if err != nil {
+			lastErr = fmt.Errorf("failed to begin transaction: %w", err)
+			if attempt < d.config.MaxRetries {
+				d.logger.Warn("Batch transaction begin failed, retrying",
+					slog.Int("attempt", attempt+1),
+					slog.Any("error", err))
+				time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
+				continue
+			}
+			return lastErr
+		}
+		defer tx.Rollback()
 
+		// Try optimized multi-row insert if all records have the same schema
+		batchErr := d.insertBatchOptimized(tx)
+
+		if batchErr != nil {
+			lastErr = batchErr
+			if attempt < d.config.MaxRetries {
+				d.logger.Warn("Batch insert failed, retrying",
+					slog.Int("attempt", attempt+1),
+					slog.Any("error", batchErr))
+				time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
+				continue
+			}
+			return fmt.Errorf("failed to flush batch after %d attempts: %w", d.config.MaxRetries+1, lastErr)
+		}
+
+		// Commit the transaction
+		if err := tx.Commit(); err != nil {
+			lastErr = fmt.Errorf("failed to commit transaction: %w", err)
+			if attempt < d.config.MaxRetries {
+				d.logger.Warn("Batch commit failed, retrying",
+					slog.Int("attempt", attempt+1),
+					slog.Any("error", err))
+				time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
+				continue
+			}
+			return fmt.Errorf("failed to commit batch after %d attempts: %w", d.config.MaxRetries+1, lastErr)
+		}
+
+		// Success - clear buffer and return
+		d.buffer = d.buffer[:0]
+		return nil
+	}
+
+	return fmt.Errorf("failed to flush batch after %d attempts: %w", d.config.MaxRetries+1, lastErr)
+}
+
+// insertBatchOptimized attempts to insert all records in a batch using optimized methods.
+// If all records have the same column schema, uses a single multi-row INSERT.
+// Otherwise, falls back to individual inserts.
+func (d *DuckDBSink) insertBatchOptimized(tx *sql.Tx) error {
+	if len(d.buffer) == 0 {
+		return nil
+	}
+
+	// Check if all records have the same column set
+	firstRecord := d.buffer[0]
+	firstColumns := make([]string, 0, len(firstRecord))
+	for col := range firstRecord {
+		firstColumns = append(firstColumns, col)
+	}
+
+	// Sort columns for consistent ordering
+	sort.Strings(firstColumns)
+
+	// Check if all records have the same columns
+	allSameSchema := true
+	for _, record := range d.buffer[1:] {
+		recordColumns := make([]string, 0, len(record))
+		for col := range record {
+			recordColumns = append(recordColumns, col)
+		}
+		sort.Strings(recordColumns)
+
+		if len(recordColumns) != len(firstColumns) {
+			allSameSchema = false
+			break
+		}
+		for i, col := range recordColumns {
+			if col != firstColumns[i] {
+				allSameSchema = false
+				break
+			}
+		}
+		if !allSameSchema {
+			break
+		}
+	}
+
+	if allSameSchema && len(d.buffer) > 1 {
+		// Use optimized multi-row insert
+		return d.insertBatchMultiRow(tx, firstColumns)
+	}
+
+	// Fall back to individual inserts
 	for _, record := range d.buffer {
 		if err := d.insertRecordInTransaction(tx, record); err != nil {
 			return err
 		}
 	}
 
-	// Clear buffer
-	d.buffer = d.buffer[:0]
+	return nil
+}
 
-	return tx.Commit()
+// insertBatchMultiRow performs a single multi-row INSERT for better performance
+func (d *DuckDBSink) insertBatchMultiRow(tx *sql.Tx, columns []string) error {
+	if len(d.buffer) == 0 || len(columns) == 0 {
+		return nil
+	}
+
+	// Build column names
+	quotedColumns := make([]string, len(columns))
+	for i, col := range columns {
+		quotedColumns[i] = quoteIdentifier(col)
+	}
+
+	// Build placeholders for all rows
+	var allPlaceholders []string
+	var allValues []any
+
+	for _, record := range d.buffer {
+		var rowPlaceholders []string
+		for _, col := range columns {
+			rowPlaceholders = append(rowPlaceholders, "?")
+			if val, exists := record[col]; exists {
+				allValues = append(allValues, val)
+			} else {
+				allValues = append(allValues, nil) // NULL for missing columns
+			}
+		}
+		allPlaceholders = append(allPlaceholders, "("+strings.Join(rowPlaceholders, ", ")+")")
+	}
+
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s",
+		quoteIdentifier(d.config.TableName),
+		strings.Join(quotedColumns, ", "),
+		strings.Join(allPlaceholders, ", "))
+
+	_, err := tx.Exec(query, allValues...)
+	return err
 }
 
 // insertRecordInTransaction inserts a record within a transaction.
 func (d *DuckDBSink) insertRecordInTransaction(tx *sql.Tx, record Record) error {
+	if len(record) == 0 {
+		return fmt.Errorf("empty record")
+	}
+
 	// Build column names and placeholders
 	var columns []string
 	var placeholders []string
@@ -262,6 +435,12 @@ func (d *DuckDBSink) In() chan<- any {
 	return d.in
 }
 
+// Errors returns the error channel for error reporting.
+// Returns nil if error reporting is not enabled.
+func (d *DuckDBSink) Errors() <-chan error {
+	return d.errChan
+}
+
 // AwaitCompletion blocks until the DuckDBSink has processed all received data.
 func (d *DuckDBSink) AwaitCompletion() {
 	<-d.done
@@ -273,6 +452,9 @@ func (d *DuckDBSink) AwaitCompletion() {
 func (d *DuckDBSink) Close() error {
 	if d.cancel != nil {
 		d.cancel()
+	}
+	if d.errChan != nil {
+		close(d.errChan)
 	}
 	return nil
 }
