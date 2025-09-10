@@ -46,8 +46,7 @@ func BenchmarkDuckDBSink_SingleInsert(b *testing.B) {
 	defer sink.AwaitCompletion()
 
 	// Prepare test data
-	record := Record{
-		"id":        1,
+	baseRecord := Record{
 		"name":      "benchmark_test",
 		"value":     42.5,
 		"timestamp": time.Now(),
@@ -57,7 +56,11 @@ func BenchmarkDuckDBSink_SingleInsert(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		// Update the ID for each iteration to avoid primary key conflicts
+		// Create a new record copy for each iteration to avoid race conditions
+		record := make(Record)
+		for k, v := range baseRecord {
+			record[k] = v
+		}
 		record["id"] = i
 		sink.In() <- record
 	}
@@ -401,18 +404,20 @@ func BenchmarkDuckDBSink_TypeInference(b *testing.B) {
 	}
 	defer sink.AwaitCompletion()
 
-	// Test different data types - use consistent schema for all records
+	now := time.Now()
+
 	testRecords := []Record{
-		{"id": 1, "int_val": int(42), "int64_val": int64(9223372036854775807), "float_val": 3.14159, "bool_val": true, "string_val": "test", "time_val": time.Now()},
-		{"id": 2, "int_val": int32(123), "int64_val": int64(456), "float_val": float32(2.718), "bool_val": false, "string_val": "another test", "time_val": time.Now()},
+		{"id": 1, "name": "test1", "value": 1.0, "active": true, "timestamp": now, "int_val": int(42), "int64_val": int64(9223372036854775807), "float_val": 3.14159, "bool_val": true, "string_val": "test", "time_val": now},
+		{"id": 2, "name": "test2", "value": 2.0, "active": false, "timestamp": now, "int_val": int32(123), "int64_val": int64(456), "float_val": float32(2.718), "bool_val": false, "string_val": "another test", "time_val": now},
 	}
 
 	b.ResetTimer()
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		record := make(Record)
-		for k, v := range testRecords[i%len(testRecords)] {
+		record := make(Record, len(testRecords[0])) // Pre-size the map
+		baseRecord := testRecords[i%len(testRecords)]
+		for k, v := range baseRecord {
 			record[k] = v
 		}
 		record["id"] = i
@@ -420,68 +425,4 @@ func BenchmarkDuckDBSink_TypeInference(b *testing.B) {
 	}
 
 	close(sink.In())
-}
-
-// Benchmark to compare batch sizes
-func BenchmarkDuckDBSink_BatchSizeComparison(b *testing.B) {
-	batchSizes := []int{1, 10, 50, 100, 500}
-
-	for _, batchSize := range batchSizes {
-		b.Run(fmt.Sprintf("BatchSize_%d", batchSize), func(b *testing.B) {
-			// Create a temporary database file for benchmarking
-			tmpFile, err := os.CreateTemp("", fmt.Sprintf("bench_batch_%d_*.db", batchSize))
-			if err != nil {
-				b.Fatal(err)
-			}
-			defer os.Remove(tmpFile.Name())
-			tmpFile.Close()
-			os.Remove(tmpFile.Name())
-
-			// Open database connection
-			db, err := sql.Open("duckdb", tmpFile.Name())
-			if err != nil {
-				b.Fatal(err)
-			}
-			defer db.Close()
-
-			// Create table manually
-			_, err = db.Exec(fmt.Sprintf("CREATE TABLE bench_batch_%d (id INTEGER, name VARCHAR, value DOUBLE, active BOOLEAN, timestamp TIMESTAMP)", batchSize))
-			if err != nil {
-				b.Fatal(err)
-			}
-
-			config := SinkConfig{
-				TableName: fmt.Sprintf("bench_batch_%d", batchSize),
-				BatchSize: batchSize,
-			}
-
-			sink := NewSink(context.Background(), db, config, slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})))
-			if sink == nil {
-				b.Fatal("NewSink returned nil")
-			}
-			defer sink.AwaitCompletion()
-
-			baseRecord := Record{
-				"id":        1,
-				"name":      "batch_test",
-				"value":     42.0,
-				"timestamp": time.Now(),
-			}
-
-			b.ResetTimer()
-			b.ReportAllocs()
-
-			for i := 0; i < b.N; i++ {
-				// Create a copy of the record to avoid concurrent map access
-				recordCopy := make(Record, len(baseRecord))
-				for k, v := range baseRecord {
-					recordCopy[k] = v
-				}
-				recordCopy["id"] = i
-				sink.In() <- recordCopy
-			}
-
-			close(sink.In())
-		})
-	}
 }

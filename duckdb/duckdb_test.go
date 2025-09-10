@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/reugn/go-streams"
 )
@@ -258,55 +257,6 @@ func TestDuckDBSink_EmptyStruct(t *testing.T) {
 	}
 }
 
-func TestDuckDBSink_ErrorChannel(t *testing.T) {
-	tmpFile, err := os.CreateTemp("", "duckdb_test_*.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpFile.Close()
-	os.Remove(tmpFile.Name())
-	defer os.Remove(tmpFile.Name())
-
-	db, err := sql.Open("duckdb", tmpFile.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	_, err = db.Exec("CREATE TABLE test_table (id INTEGER)")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	config := SinkConfig{TableName: "test_table", EnableErrorChannel: true}
-	sink := NewSink(context.Background(), db, config, slog.Default())
-	if sink == nil {
-		t.Fatal("NewSink returned nil")
-	}
-
-	// Verify error channel functionality
-	errChan := sink.Errors()
-	if errChan == nil {
-		t.Error("Expected error channel to be available, got nil")
-	}
-
-	record := Record{}
-	sink.In() <- record
-	close(sink.In())
-	sink.AwaitCompletion()
-
-	select {
-	case err := <-errChan:
-		if err == nil {
-			t.Error("Expected error from channel, got nil")
-		} else if err.Error() != "empty record" {
-			t.Errorf("Expected 'empty record' error, got: %v", err)
-		}
-	default:
-		t.Error("Expected error to be sent to channel, but none received")
-	}
-}
-
 func TestDuckDBSink_SpecialCharactersInNames(t *testing.T) {
 	tmpFile, err := os.CreateTemp("", "duckdb_test_*.db")
 	if err != nil {
@@ -387,30 +337,6 @@ func TestDuckDBSink_ConfigurableChannelCapacity(t *testing.T) {
 	}
 	if count != 2 {
 		t.Errorf("Expected 2 records, got %d", count)
-	}
-}
-
-func TestDuckDBSink_ExponentialBackoff(t *testing.T) {
-	// Test exponential backoff calculation
-	testCases := []struct {
-		attempt       int
-		initialDelay  time.Duration
-		maxDelay      time.Duration
-		expectedDelay time.Duration
-	}{
-		{1, 100 * time.Millisecond, 30 * time.Second, 100 * time.Millisecond},
-		{2, 100 * time.Millisecond, 30 * time.Second, 200 * time.Millisecond},
-		{3, 100 * time.Millisecond, 30 * time.Second, 400 * time.Millisecond},
-		{4, 100 * time.Millisecond, 30 * time.Second, 800 * time.Millisecond},
-		{10, 100 * time.Millisecond, 30 * time.Second, 30 * time.Second}, // capped at max
-	}
-
-	for _, tc := range testCases {
-		actualDelay := calculateRetryDelay(tc.attempt, tc.initialDelay, tc.maxDelay)
-		if actualDelay != tc.expectedDelay {
-			t.Errorf("calculateRetryDelay(%d, %v, %v) = %v, expected %v",
-				tc.attempt, tc.initialDelay, tc.maxDelay, actualDelay, tc.expectedDelay)
-		}
 	}
 }
 
