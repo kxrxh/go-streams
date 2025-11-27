@@ -53,18 +53,3 @@ func getSystemMemoryWindows() (SystemMemory, error) {
 		Available: memStatus.ullAvailPhys,
 	}, nil
 }
-
-// SetMemoryReader replaces the current memory reader (for testing).
-// It returns a cleanup function to restore the previous reader.
-func SetMemoryReader(reader MemoryReader) func() {
-	memoryReaderMu.Lock()
-	prev := memoryReader
-	memoryReader = reader
-	memoryReaderMu.Unlock()
-
-	return func() {
-		memoryReaderMu.Lock()
-		memoryReader = prev
-		memoryReaderMu.Unlock()
-	}
-}

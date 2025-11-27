@@ -36,19 +36,6 @@ func GetSystemMemory() (SystemMemory, error) {
 	return reader()
 }
 
-// SetMemoryReader replaces the current memory reader (for testing)
-func SetMemoryReader(reader MemoryReader) func() {
-	memoryReaderMu.Lock()
-	prev := memoryReader
-	memoryReader = reader
-	memoryReaderMu.Unlock()
-	return func() {
-		memoryReaderMu.Lock()
-		memoryReader = prev
-		memoryReaderMu.Unlock()
-	}
-}
-
 type cgroupMemoryConfig struct {
 	usagePath      string
 	limitPath      string

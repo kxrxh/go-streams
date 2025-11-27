@@ -68,18 +68,3 @@ func getSystemMemoryDarwin() (SystemMemory, error) {
 		Available: free + inactive + speculative,
 	}, nil
 }
-
-// SetMemoryReader replaces the current memory reader (for testing).
-// It returns a cleanup function to restore the previous reader.
-func SetMemoryReader(reader MemoryReader) func() {
-	memoryReaderMu.Lock()
-	prev := memoryReader
-	memoryReader = reader
-	memoryReaderMu.Unlock()
-
-	return func() {
-		memoryReaderMu.Lock()
-		memoryReader = prev
-		memoryReaderMu.Unlock()
-	}
-}

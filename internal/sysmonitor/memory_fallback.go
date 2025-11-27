@@ -30,18 +30,3 @@ func GetSystemMemory() (SystemMemory, error) {
 	}
 	return SystemMemory{}, errors.New("memory monitoring not supported on this platform")
 }
-
-// SetMemoryReader replaces the current memory reader (for testing).
-// It returns a cleanup function to restore the previous reader.
-func SetMemoryReader(reader MemoryReader) func() {
-	memoryReaderMu.Lock()
-	prev := memoryReader
-	memoryReader = reader
-	memoryReaderMu.Unlock()
-
-	return func() {
-		memoryReaderMu.Lock()
-		memoryReader = prev
-		memoryReaderMu.Unlock()
-	}
-}
