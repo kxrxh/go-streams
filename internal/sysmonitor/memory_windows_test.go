@@ -90,3 +90,81 @@ func TestWindowsMemoryReader_Consistency(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowsMemoryReader_MemoryPressure(t *testing.T) {
+	reader := newPlatformMemoryReader(nil).(*windowsMemoryReader)
+
+	// Take baseline reading
+	baseline, err := reader.Sample()
+	if err != nil {
+		t.Fatalf("Failed to get baseline memory reading: %v", err)
+	}
+
+	// Allocate some memory to simulate pressure (this won't actually change system memory much,
+	// but tests that the reader continues to work)
+	testData := make([]byte, 10*1024*1024) // 10MB
+	_ = testData                           // Prevent optimization
+
+	// Take reading after allocation
+	afterAlloc, err := reader.Sample()
+	if err != nil {
+		t.Fatalf("Failed to get memory reading after allocation: %v", err)
+	}
+
+	// Memory readings should still be valid
+	if afterAlloc.Total != baseline.Total {
+		t.Errorf("Total memory changed unexpectedly: before=%d, after=%d", baseline.Total, afterAlloc.Total)
+	}
+
+	if afterAlloc.Available > afterAlloc.Total {
+		t.Errorf("Invalid memory reading: available (%d) > total (%d)", afterAlloc.Available, afterAlloc.Total)
+	}
+
+	// Clean up
+	testData = nil
+}
+
+// TestWindowsMemoryReader_MultipleReaders tests multiple readers work independently
+func TestWindowsMemoryReader_MultipleReaders(t *testing.T) {
+	reader1 := newPlatformMemoryReader(nil).(*windowsMemoryReader)
+	reader2 := newPlatformMemoryReader(nil).(*windowsMemoryReader)
+
+	mem1, err := reader1.Sample()
+	if err != nil {
+		t.Fatalf("Reader1 failed: %v", err)
+	}
+
+	mem2, err := reader2.Sample()
+	if err != nil {
+		t.Fatalf("Reader2 failed: %v", err)
+	}
+
+	// Both readers should return the same system memory info
+	if mem1.Total != mem2.Total {
+		t.Errorf("Readers returned different total memory: reader1=%d, reader2=%d", mem1.Total, mem2.Total)
+	}
+}
+
+// TestWindowsMemoryReader_PercentageCalculation tests memory percentage calculations
+func TestWindowsMemoryReader_PercentageCalculation(t *testing.T) {
+	reader := newPlatformMemoryReader(nil).(*windowsMemoryReader)
+
+	mem, err := reader.Sample()
+	if err != nil {
+		t.Fatalf("Failed to sample memory: %v", err)
+	}
+
+	if mem.Total == 0 {
+		t.Fatal("Total memory is zero, cannot calculate percentages")
+	}
+
+	// Calculate usage percentage
+	used := mem.Total - mem.Available
+	usagePercent := float64(used) / float64(mem.Total) * 100.0
+
+	if usagePercent < 0.0 || usagePercent > 100.0 {
+		t.Errorf("Invalid usage percentage: %f%%", usagePercent)
+	}
+
+	t.Logf("Memory usage: %d/%d bytes (%.2f%%)", used, mem.Total, usagePercent)
+}
