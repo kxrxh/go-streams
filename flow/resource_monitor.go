@@ -44,11 +44,12 @@ type ResourceMonitor struct {
 	memoryReader   func() (float64, error) // Custom memory usage reader.
 
 	// Runtime state
-	stats            atomic.Pointer[ResourceStats] // Latest resource statistics.
-	sampler          sysmonitor.ProcessCPUSampler  // CPU usage sampler implementation.
-	updateIntervalCh chan time.Duration            // Channel for dynamic interval updates.
-	done             chan struct{}                 // Signals monitoring loop termination.
-	closeOnce        sync.Once                     // Ensures clean shutdown.
+	stats                atomic.Pointer[ResourceStats]  // Latest resource statistics.
+	sampler              sysmonitor.ProcessCPUSampler   // CPU usage sampler implementation.
+	memoryReaderInstance sysmonitor.ProcessMemoryReader // System memory reader instance.
+	updateIntervalCh     chan time.Duration             // Channel for dynamic interval updates.
+	done                 chan struct{}                  // Signals monitoring loop termination.
+	closeOnce            sync.Once                      // Ensures clean shutdown.
 }
 
 // newResourceMonitor creates a new resource monitor instance.
@@ -72,6 +73,7 @@ func newResourceMonitor(
 	})
 
 	rm.initSampler()
+	rm.initMemoryReader()
 
 	go rm.monitor()
 	return rm
@@ -108,7 +110,7 @@ func (rm *ResourceMonitor) SetMode(newMode CPUUsageMode) {
 	switch newMode {
 	case CPUUsageModeMeasured:
 		// Try to switch to measured mode
-		if sampler, err := sysmonitor.NewProcessSampler(); err == nil {
+		if sampler, err := sysmonitor.NewCPUSampler(sysmonitor.OSFileSystem{}); err == nil {
 			rm.sampler = sampler
 			rm.cpuMode = CPUUsageModeMeasured
 		} else {
@@ -123,7 +125,7 @@ func (rm *ResourceMonitor) SetMode(newMode CPUUsageMode) {
 // initSampler initializes the appropriate CPU usage sampler.
 // Uses measured mode by default if available
 func (rm *ResourceMonitor) initSampler() {
-	if sampler, err := sysmonitor.NewProcessSampler(); err == nil {
+	if sampler, err := sysmonitor.NewCPUSampler(sysmonitor.OSFileSystem{}); err == nil {
 		rm.sampler = sampler
 		rm.cpuMode = CPUUsageModeMeasured
 	} else {
@@ -131,6 +133,12 @@ func (rm *ResourceMonitor) initSampler() {
 		rm.sampler = sysmonitor.NewGoroutineHeuristicSampler()
 		rm.cpuMode = CPUUsageModeHeuristic
 	}
+}
+
+// initMemoryReader initializes the system memory reader.
+// This reader is reused across all sampling operations.
+func (rm *ResourceMonitor) initMemoryReader() {
+	rm.memoryReaderInstance = sysmonitor.NewProcessMemoryReader(sysmonitor.OSFileSystem{})
 }
 
 // monitor runs the continuous resource sampling loop.
@@ -167,16 +175,18 @@ func (rm *ResourceMonitor) sample() {
 	}
 
 	// Memory Usage
+	switch {
 	// Check if a custom memory reader is provided
-	if rm.memoryReader != nil {
+	case rm.memoryReader != nil:
 		if mem, err := rm.memoryReader(); err == nil {
 			stats.MemoryUsedPercent = mem
 		}
-		// If not, use system memory stats
-	} else if memStats, err := sysmonitor.GetSystemMemory(); err == nil && memStats.Total > 0 {
-		used := memStats.Total - memStats.Available
-		stats.MemoryUsedPercent = float64(used) / float64(memStats.Total) * 100
-	} else {
+	case rm.memoryReaderInstance != nil:
+		if memStats, err := rm.memoryReaderInstance.Sample(); err == nil && memStats.Total > 0 {
+			used := memStats.Total - memStats.Available
+			stats.MemoryUsedPercent = float64(used) / float64(memStats.Total) * 100
+		}
+	default:
 		// Fallback to runtime memory stats
 		var m runtime.MemStats
 		runtime.ReadMemStats(&m)
@@ -186,8 +196,7 @@ func (rm *ResourceMonitor) sample() {
 	}
 
 	// CPU Usage
-	cpu := rm.sampler.Sample(rm.sampleInterval)
-	stats.CPUUsagePercent = cpu
+	stats.CPUUsagePercent = rm.sampler.Sample(rm.sampleInterval)
 
 	rm.stats.Store(stats)
 }
@@ -251,7 +260,9 @@ func (r *monitorRegistry) Acquire(
 
 	// Cancel pending stop if we are resurrecting within the grace period
 	if r.stopTimer != nil {
-		r.stopTimer.Stop()
+		if !r.stopTimer.Stop() {
+			<-r.stopTimer.C
+		}
 		r.stopTimer = nil
 	}
 

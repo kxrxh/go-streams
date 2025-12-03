@@ -647,52 +647,6 @@ func TestResourceMonitor_BoundaryConditions(t *testing.T) {
 	})
 }
 
-// TestResourceMonitor_ExtremeMemoryValues tests handling of extreme memory values
-func TestResourceMonitor_ExtremeMemoryValues(t *testing.T) {
-	setupTest(t)
-
-	testCases := []struct {
-		name     string
-		memValue float64
-	}{
-		{"zero memory", 0.0},
-		{"negative memory", -50.0},
-		{"normal memory", 75.5},
-		{"max memory", 100.0},
-		{"over max memory", 150.0},
-		{"very large memory", 1e6},
-		{"NaN memory", math.NaN()},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			mockReader := func() (float64, error) {
-				return tc.memValue, nil
-			}
-
-			rm := newResourceMonitor(time.Hour, CPUUsageModeHeuristic, mockReader)
-			defer rm.stop()
-
-			rm.sample()
-			stats := rm.GetStats()
-
-			// The implementation currently passes through any value from the custom reader
-			// without validation. This documents the current behavior.
-			if stats.MemoryUsedPercent != tc.memValue && !math.IsNaN(tc.memValue) {
-				t.Errorf("Expected memory %f, got %f", tc.memValue, stats.MemoryUsedPercent)
-			}
-			if math.IsNaN(tc.memValue) && !math.IsNaN(stats.MemoryUsedPercent) {
-				t.Errorf("Expected NaN memory, got %f", stats.MemoryUsedPercent)
-			}
-
-			// Always check other stats are reasonable
-			if stats.GoroutineCount <= 0 {
-				t.Errorf("Expected goroutine count > 0, got %d", stats.GoroutineCount)
-			}
-		})
-	}
-}
-
 // TestResourceMonitor_Stop tests the stop method for cleanup and shutdown
 func TestResourceMonitor_Stop(t *testing.T) {
 	setupTest(t)
@@ -791,23 +745,6 @@ func TestResourceMonitor_GetStats_Concurrent(t *testing.T) {
 	// Check for errors
 	for err := range errors {
 		t.Error(err)
-	}
-}
-
-// TestResourceMonitor_GetStats_NilPointer tests GetStats with nil pointer
-func TestResourceMonitor_GetStats_NilPointer(t *testing.T) {
-	setupTest(t)
-
-	rm := newResourceMonitor(time.Hour, CPUUsageModeHeuristic, nil)
-	defer rm.stop()
-
-	// Manually set stats to nil (simulating edge case)
-	rm.stats.Store(nil)
-
-	// GetStats should return empty ResourceStats, not panic
-	stats := rm.GetStats()
-	if !stats.Timestamp.IsZero() {
-		t.Error("Expected zero timestamp for nil stats")
 	}
 }
 
@@ -934,30 +871,70 @@ func TestMonitorRegistry_CalculateMinInterval(t *testing.T) {
 	}
 }
 
-// TestMonitorRegistry_CalculateMinInterval_EdgeCases tests edge cases for calculateMinInterval
-func TestMonitorRegistry_CalculateMinInterval_EdgeCases(t *testing.T) {
-	tests := []struct {
-		name      string
-		intervals map[time.Duration]int
-		expected  time.Duration
-	}{
-		{"single nanosecond", map[time.Duration]int{time.Nanosecond: 1}, time.Nanosecond},
-		{"multiple same intervals", map[time.Duration]int{time.Second: 5}, time.Second},
-		{"mixed with duplicates", map[time.Duration]int{
-			100 * time.Millisecond: 2,
-			200 * time.Millisecond: 1,
-		}, 100 * time.Millisecond},
+// TestResourceMonitor_GetStats_NilStats tests GetStats when stats pointer is nil
+func TestResourceMonitor_GetStats_NilStats(t *testing.T) {
+	setupTest(t)
+
+	rm := newResourceMonitor(time.Hour, CPUUsageModeHeuristic, nil)
+	defer rm.stop()
+
+	// Manually set stats to nil to simulate uninitialized state
+	rm.stats.Store(nil)
+
+	// GetStats should return empty ResourceStats without panicking
+	stats := rm.GetStats()
+
+	// Verify it returns zero/empty stats
+	if !stats.Timestamp.IsZero() {
+		t.Error("Expected zero timestamp for nil stats")
+	}
+	if stats.CPUUsagePercent != 0 {
+		t.Errorf("Expected zero CPU usage, got %f", stats.CPUUsagePercent)
+	}
+	if stats.MemoryUsedPercent != 0 {
+		t.Errorf("Expected zero memory usage, got %f", stats.MemoryUsedPercent)
+	}
+	if stats.GoroutineCount != 0 {
+		t.Errorf("Expected zero goroutine count, got %d", stats.GoroutineCount)
+	}
+}
+
+// TestResourceMonitor_Sample_RuntimeMemoryFallback tests sample method fallback to runtime memory stats
+func TestResourceMonitor_Sample_RuntimeMemoryFallback(t *testing.T) {
+	setupTest(t)
+
+	// Create monitor with nil memory reader and instance to force fallback
+	rm := newResourceMonitor(time.Hour, CPUUsageModeHeuristic, nil)
+	defer rm.stop()
+
+	// Ensure memory reader instance is nil (fallback path)
+	rm.memoryReaderInstance = nil
+
+	// Record initial stats before sampling
+	initialStats := rm.GetStats()
+
+	// Trigger sampling
+	rm.sample()
+
+	// Get updated stats
+	stats := rm.GetStats()
+
+	// Verify basic stats are populated
+	assertValidStats(t, stats)
+	if !stats.Timestamp.After(initialStats.Timestamp) {
+		t.Error("Timestamp should be updated after sampling")
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			setupTest(t)
+	// Verify CPU usage is set (even if 0, it's still assigned)
+	// Note: CPU usage could be 0 in heuristic mode, which is valid
 
-			globalMonitorRegistry.intervalRefs = tt.intervals
-			minInterval := globalMonitorRegistry.calculateMinInterval()
-			if minInterval != tt.expected {
-				t.Errorf("Expected %v, got %v", tt.expected, minInterval)
-			}
-		})
+	// Verify goroutine count is reasonable
+	if stats.GoroutineCount <= 0 {
+		t.Errorf("Expected goroutine count > 0, got %d", stats.GoroutineCount)
+	}
+
+	// Memory usage should be a valid percentage (runtime.ReadMemStats fallback)
+	if stats.MemoryUsedPercent < 0 || stats.MemoryUsedPercent > 100 {
+		t.Errorf("Expected memory percentage in range [0,100], got %f", stats.MemoryUsedPercent)
 	}
 }

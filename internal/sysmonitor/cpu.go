@@ -31,6 +31,6 @@ type ProcessCPUSampler interface {
 // NewProcessSampler creates a CPU sampler for the current process.
 // Automatically selects platform-specific implementation (Linux/Darwin/Windows).
 // Returns error on unsupported platforms or if sampler creation fails.
-func NewProcessSampler() (ProcessCPUSampler, error) {
-	return newProcessSampler()
+func NewCPUSampler(fs FileSystem) (ProcessCPUSampler, error) {
+	return newPlatformCPUSampler(fs)
 }

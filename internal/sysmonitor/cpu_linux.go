@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"math"
 	"os"
 	"runtime"
@@ -15,8 +14,9 @@ import (
 	"time"
 )
 
-// ProcessSampler samples CPU usage for the current process
-type ProcessSampler struct {
+// linuxProcessSampler samples CPU usage for the current process on Linux
+type linuxProcessSampler struct {
+	fs          FileSystem
 	pid         int
 	lastUTime   float64
 	lastSTime   float64
@@ -25,33 +25,39 @@ type ProcessSampler struct {
 	clockTicks  int64
 }
 
-// newProcessSampler creates a CPU sampler for the current process
-func newProcessSampler() (*ProcessSampler, error) {
+// newPlatformCPUSampler is the factory entry point used by cpu.go
+func newPlatformCPUSampler(fs FileSystem) (ProcessCPUSampler, error) {
 	pid := os.Getpid()
 	if pid < 0 || pid > math.MaxInt32 {
 		return nil, fmt.Errorf("invalid PID: %d", pid)
 	}
 
-	clockTicks, err := getClockTicks()
+	// We attempt to get clock ticks using the provided FS.
+	// If it fails, we fallback to 100.
+	ticks, err := getClockTicks(fs)
 	if err != nil {
-		clockTicks = 100 // fallback
+		ticks = 100
 	}
 
-	return &ProcessSampler{
+	return &linuxProcessSampler{
+		fs:         fs,
 		pid:        pid,
-		clockTicks: clockTicks,
+		clockTicks: ticks,
 	}, nil
 }
 
 // Sample returns the CPU usage percentage since the last sample
-func (s *ProcessSampler) Sample(deltaTime time.Duration) float64 {
-	utime, stime, err := s.readProcessTimes()
-	if err != nil {
-		return s.lastPercent // Return last known value on error
-	}
-
+func (s *linuxProcessSampler) Sample(deltaTime time.Duration) float64 {
 	now := time.Now()
 	if s.lastSample.IsZero() {
+		// First sample - try to initialize
+		utime, stime, err := s.readProcessTimes()
+		if err != nil {
+			// If we can't read process times, still mark as initialized to avoid repeated attempts
+			s.lastSample = now
+			s.lastPercent = 0.0
+			return 0.0
+		}
 		s.lastUTime = float64(utime)
 		s.lastSTime = float64(stime)
 		s.lastSample = now
@@ -59,7 +65,13 @@ func (s *ProcessSampler) Sample(deltaTime time.Duration) float64 {
 		return 0.0
 	}
 
+	utime, stime, err := s.readProcessTimes()
+	if err != nil {
+		return s.lastPercent // Return last known value on error
+	}
+
 	elapsed := now.Sub(s.lastSample)
+	// If called too frequently, return cached value to avoid jitter
 	if elapsed < deltaTime/2 {
 		return s.lastPercent
 	}
@@ -76,6 +88,11 @@ func (s *ProcessSampler) Sample(deltaTime time.Duration) float64 {
 	if numcpu <= 0 {
 		numcpu = 1 // Safety check
 	}
+
+	if wallTimeSeconds <= 0 {
+		return s.lastPercent
+	}
+
 	percent := (cpuTimeSeconds / wallTimeSeconds) * 100.0 / float64(numcpu)
 
 	if percent > 100.0 {
@@ -92,7 +109,7 @@ func (s *ProcessSampler) Sample(deltaTime time.Duration) float64 {
 }
 
 // Reset clears sampler state for a new session
-func (s *ProcessSampler) Reset() {
+func (s *linuxProcessSampler) Reset() {
 	s.lastUTime = 0.0
 	s.lastSTime = 0.0
 	s.lastSample = time.Time{}
@@ -100,20 +117,15 @@ func (s *ProcessSampler) Reset() {
 }
 
 // IsInitialized returns true if at least one sample has been taken
-func (s *ProcessSampler) IsInitialized() bool {
+func (s *linuxProcessSampler) IsInitialized() bool {
 	return !s.lastSample.IsZero()
 }
 
 // readProcessTimes reads CPU times from /proc/<pid>/stat (returns ticks)
-func (s *ProcessSampler) readProcessTimes() (utime, stime int64, err error) {
+func (s *linuxProcessSampler) readProcessTimes() (utime, stime int64, err error) {
 	path := fmt.Sprintf("/proc/%d/stat", s.pid)
-	file, err := os.Open(path)
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to open file %s: %w", path, err)
-	}
-	defer file.Close()
 
-	content, err := io.ReadAll(file)
+	content, err := s.fs.ReadFile(path)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to read file %s: %w", path, err)
 	}
@@ -128,20 +140,20 @@ func (s *ProcessSampler) readProcessTimes() (utime, stime int64, err error) {
 	// utime=field[13], stime=field[14]
 	utime, err = strconv.ParseInt(fields[13], 10, 64)
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to parse utime from field[13] in /proc/%d/stat: %w", s.pid, err)
+		return 0, 0, fmt.Errorf("failed to parse utime from field[13]: %w", err)
 	}
 
 	stime, err = strconv.ParseInt(fields[14], 10, 64)
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to parse stime from field[14] in /proc/%d/stat: %w", s.pid, err)
+		return 0, 0, fmt.Errorf("failed to parse stime from field[14]: %w", err)
 	}
 
 	return utime, stime, nil
 }
 
 // getClockTicks reads clock ticks per second from /proc/self/auxv (AT_CLKTCK=17)
-func getClockTicks() (int64, error) {
-	data, err := os.ReadFile("/proc/self/auxv")
+func getClockTicks(fs FileSystem) (int64, error) {
+	data, err := fs.ReadFile("/proc/self/auxv")
 	if err != nil {
 		return 100, nil // fallback
 	}

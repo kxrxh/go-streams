@@ -7,33 +7,105 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
 )
 
-var (
-	memoryReader     MemoryReader
-	fileSystem       FileSystem
-	memoryReaderMu   sync.RWMutex
-	memoryReaderOnce sync.Once
-)
+// linuxMemoryReader implements ProcessMemoryReader for Linux.
+// It encapsulates the logic for auto-detecting Cgroup/Host memory stats.
+type linuxMemoryReader struct {
+	// delegate is the active strategy (CgroupV2, CgroupV1, or Host).
+	delegate func() (SystemMemory, error)
+	fs       FileSystem
+	mu       sync.RWMutex
+	once     sync.Once
+}
 
-// GetSystemMemory returns the current system memory statistics.
-// This function auto-detects the environment (cgroup v2, v1, or host)
-// and returns appropriate memory information.
-func GetSystemMemory() (SystemMemory, error) {
-	memoryReaderOnce.Do(func() {
-		memoryReader = readSystemMemoryAuto
-		fileSystem = OSFileSystem{}
+// newPlatformMemoryReader is the factory entry point used by memory.go.
+func newPlatformMemoryReader(fs FileSystem) ProcessMemoryReader {
+	return &linuxMemoryReader{
+		fs: fs,
+	}
+}
+
+// Sample returns the current system memory statistics.
+// It lazily initializes the correct strategy (Cgroup vs Host) on the first call.
+func (m *linuxMemoryReader) Sample() (SystemMemory, error) {
+	m.once.Do(func() {
+		m.detectEnvironment()
 	})
 
-	memoryReaderMu.RLock()
-	reader := memoryReader
-	memoryReaderMu.RUnlock()
+	m.mu.RLock()
+	strategy := m.delegate
+	m.mu.RUnlock()
 
-	return reader()
+	if strategy == nil {
+		return SystemMemory{}, fmt.Errorf("failed to initialize memory reader strategy")
+	}
+
+	return strategy()
+}
+
+// detectEnvironment checks for Cgroups and sets the appropriate delegate strategy.
+func (m *linuxMemoryReader) detectEnvironment() {
+	// 1. Try Cgroup V2
+	if m.cgroupFilesExist(cgroupV2Config) {
+		m.mu.Lock()
+		m.delegate = m.makeCgroupV2Strategy()
+		m.mu.Unlock()
+		return
+	}
+
+	// 2. Try Cgroup V1
+	if m.cgroupFilesExist(cgroupV1Config) {
+		m.mu.Lock()
+		m.delegate = m.makeCgroupV1Strategy()
+		m.mu.Unlock()
+		return
+	}
+
+	// 3. Fallback to Host /proc/meminfo
+	m.mu.Lock()
+	m.delegate = m.readHostMemory
+	m.mu.Unlock()
+}
+
+// readHostMemory reads memory info from /proc/meminfo (via FS abstraction)
+func (m *linuxMemoryReader) readHostMemory() (SystemMemory, error) {
+	file, err := m.fs.Open("/proc/meminfo")
+	if err != nil {
+		return SystemMemory{}, fmt.Errorf("failed to open /proc/meminfo: %w", err)
+	}
+	defer file.Close()
+
+	return parseMemInfo(file)
+}
+
+// makeCgroupV2Strategy returns a function bound to the current FS instance
+func (m *linuxMemoryReader) makeCgroupV2Strategy() func() (SystemMemory, error) {
+	return func() (SystemMemory, error) {
+		return readCgroupMemoryWithFS(m.fs, cgroupV2Config)
+	}
+}
+
+// makeCgroupV1Strategy returns a function bound to the current FS instance
+func (m *linuxMemoryReader) makeCgroupV1Strategy() func() (SystemMemory, error) {
+	return func() (SystemMemory, error) {
+		return readCgroupMemoryWithFS(m.fs, cgroupV1Config)
+	}
+}
+
+// cgroupFilesExist checks if the required cgroup files exist and are readable
+func (m *linuxMemoryReader) cgroupFilesExist(config cgroupMemoryConfig) bool {
+	// Check if all required files can be read
+	paths := []string{config.usagePath, config.limitPath, config.statPath}
+	for _, path := range paths {
+		if _, err := m.fs.ReadFile(path); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 type cgroupMemoryConfig struct {
@@ -64,47 +136,6 @@ var (
 	}
 )
 
-// readSystemMemoryAuto detects the environment once and "upgrades" the reader
-func readSystemMemoryAuto() (SystemMemory, error) {
-	if m, err := readCgroupMemoryWithFS(fileSystem, cgroupV2Config); err == nil {
-		memoryReaderMu.Lock()
-		memoryReader = makeCgroupV2Reader(fileSystem)
-		memoryReaderMu.Unlock()
-		return m, nil
-	}
-
-	if m, err := readCgroupMemoryWithFS(fileSystem, cgroupV1Config); err == nil {
-		memoryReaderMu.Lock()
-		memoryReader = makeCgroupV1Reader(fileSystem)
-		memoryReaderMu.Unlock()
-		return m, nil
-	}
-
-	// Fallback to Host (Bare metal / VM / Unlimited Container)
-	m, err := readSystemMemory()
-	if err != nil {
-		return SystemMemory{}, fmt.Errorf("failed to read system memory from all sources: %w", err)
-	}
-	memoryReaderMu.Lock()
-	memoryReader = readSystemMemory
-	memoryReaderMu.Unlock()
-	return m, nil
-}
-
-// makeCgroupV2Reader creates a MemoryReader function for cgroup v2
-func makeCgroupV2Reader(fs FileSystem) MemoryReader {
-	return func() (SystemMemory, error) {
-		return readCgroupMemoryWithFS(fs, cgroupV2Config)
-	}
-}
-
-// makeCgroupV1Reader creates a MemoryReader function for cgroup v1
-func makeCgroupV1Reader(fs FileSystem) MemoryReader {
-	return func() (SystemMemory, error) {
-		return readCgroupMemoryWithFS(fs, cgroupV1Config)
-	}
-}
-
 func readCgroupMemoryWithFS(fs FileSystem, config cgroupMemoryConfig) (SystemMemory, error) {
 	usage, err := readCgroupValueWithFS(fs, config.usagePath, false)
 	if err != nil {
@@ -123,8 +154,6 @@ func readCgroupMemoryWithFS(fs FileSystem, config cgroupMemoryConfig) (SystemMem
 	}
 
 	// Available = (Limit - Usage) + Reclaimable
-	// Note: If Limit - Usage is near zero, the kernel would reclaim inactive_file
-	// Handle case where usage exceeds limit
 	var available uint64
 	if usage > limit {
 		available = inactiveFile // Only reclaimable memory is available
@@ -189,18 +218,6 @@ func readCgroupStatWithFS(fs FileSystem, path string, key string) (uint64, error
 	return 0, fmt.Errorf("key %q not found in %s", key, path)
 }
 
-// readSystemMemory reads memory info from /proc/meminfo
-func readSystemMemory() (SystemMemory, error) {
-	file, err := os.Open("/proc/meminfo")
-	if err != nil {
-		return SystemMemory{}, fmt.Errorf("failed to open /proc/meminfo: %w", err)
-	}
-	defer file.Close()
-
-	return parseMemInfo(file)
-}
-
-// parseMemInfo parses the /proc/meminfo file format
 func parseMemInfo(r io.Reader) (SystemMemory, error) {
 	memFields, err := parseMemInfoFields(r)
 	if err != nil {
@@ -216,7 +233,6 @@ func parseMemInfo(r io.Reader) (SystemMemory, error) {
 		return SystemMemory{}, err
 	}
 
-	// Ensure available doesn't exceed total
 	if available > memFields.total {
 		available = memFields.total
 	}
@@ -253,8 +269,6 @@ func parseMemInfoFields(r io.Reader) (memInfoFields, error) {
 			continue
 		}
 
-		// Convert from kB to bytes
-		// Check for overflow
 		const maxValueBeforeOverflow = (1<<64 - 1) / 1024
 		if value > maxValueBeforeOverflow {
 			return memInfoFields{}, fmt.Errorf(
@@ -274,7 +288,6 @@ func parseMemInfoFields(r io.Reader) (memInfoFields, error) {
 			fields.cached = value
 		}
 
-		// Early exit if we have MemTotal and MemAvailable (kernel 3.14+)
 		if fields.total > 0 && fields.memAvailableFound {
 			break
 		}
@@ -291,14 +304,11 @@ func calculateAvailableMemory(fields memInfoFields) (uint64, error) {
 	if fields.memAvailableFound {
 		return fields.available, nil
 	}
-
-	// Fallback calculation for MemAvailable
 	available := fields.free + fields.cached
 	if available == 0 {
 		return 0, fmt.Errorf(
 			"could not find MemAvailable in /proc/meminfo and fallback calculation failed " +
 				"(MemFree and Cached not found or both zero)")
 	}
-
 	return available, nil
 }

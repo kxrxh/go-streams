@@ -4,7 +4,6 @@ package sysmonitor
 
 import (
 	"fmt"
-	"sync"
 	"syscall"
 	"unsafe"
 )
@@ -12,11 +11,9 @@ import (
 var (
 	kernel32                 = syscall.NewLazyDLL("kernel32.dll")
 	procGlobalMemoryStatusEx = kernel32.NewProc("GlobalMemoryStatusEx")
-
-	memoryReader   = getSystemMemoryWindows
-	memoryReaderMu sync.RWMutex
 )
 
+// memoryStatusEx matches the MEMORYSTATUSEX structure in Windows API
 type memoryStatusEx struct {
 	dwLength                uint32
 	dwMemoryLoad            uint32
@@ -29,22 +26,24 @@ type memoryStatusEx struct {
 	ullAvailExtendedVirtual uint64
 }
 
-func GetSystemMemory() (SystemMemory, error) {
-	memoryReaderMu.RLock()
-	reader := memoryReader
-	memoryReaderMu.RUnlock()
-	return reader()
+// windowsMemoryReader implements ProcessMemoryReader for Windows using Win32 API.
+type windowsMemoryReader struct{}
+
+// newPlatformMemoryReader is the factory entry point.
+func newPlatformMemoryReader(_ FileSystem) ProcessMemoryReader {
+	return &windowsMemoryReader{}
 }
 
-func getSystemMemoryWindows() (SystemMemory, error) {
+// Sample returns the current system memory statistics.
+func (w *windowsMemoryReader) Sample() (SystemMemory, error) {
 	var memStatus memoryStatusEx
-
 	memStatus.dwLength = uint32(unsafe.Sizeof(memStatus))
 
+	// Call GlobalMemoryStatusEx
 	ret, _, err := procGlobalMemoryStatusEx.Call(uintptr(unsafe.Pointer(&memStatus)))
 
 	// If the function fails, the return value is zero.
-	if ret == 0 || err != nil {
+	if ret == 0 {
 		return SystemMemory{}, fmt.Errorf("failed to get system memory status via GlobalMemoryStatusEx: %w", err)
 	}
 

@@ -1,95 +1,187 @@
 package sysmonitor
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
+// MockFS is a mock implementation of FileSystem for testing
+type MockFS struct {
+	ReadFileFunc func(name string) ([]byte, error)
+	OpenFunc     func(name string) (fs.File, error)
+}
+
+func (m MockFS) ReadFile(name string) ([]byte, error) {
+	if m.ReadFileFunc != nil {
+		return m.ReadFileFunc(name)
+	}
+	return nil, nil
+}
+
+func (m MockFS) Open(name string) (fs.File, error) {
+	if m.OpenFunc != nil {
+		return m.OpenFunc(name)
+	}
+	return nil, nil
+}
+
 func TestOSFileSystem_ReadFile(t *testing.T) {
+	// Create a temporary directory for testing
+	tempDir := t.TempDir()
+
+	// Test successful read
+	testContent := "Hello, World!"
+	testFile := filepath.Join(tempDir, "test.txt")
+	err := os.WriteFile(testFile, []byte(testContent), 0o600)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
 	fs := OSFileSystem{}
+	data, err := fs.ReadFile(testFile)
+	if err != nil {
+		t.Errorf("ReadFile failed: %v", err)
+	}
+	if string(data) != testContent {
+		t.Errorf("Expected %q, got %q", testContent, string(data))
+	}
 
-	t.Run("read existing file", func(t *testing.T) {
-		// Create a temporary file
-		tmpFile, err := os.CreateTemp(t.TempDir(), "test-*.txt")
-		if err != nil {
-			t.Fatalf("failed to create temp file: %v", err)
-		}
-		defer os.Remove(tmpFile.Name())
-		defer tmpFile.Close()
-
-		testContent := []byte("test content")
-		if _, err := tmpFile.Write(testContent); err != nil {
-			t.Fatalf("failed to write to temp file: %v", err)
-		}
-		tmpFile.Close()
-
-		// Read the file
-		content, err := fs.ReadFile(tmpFile.Name())
-		if err != nil {
-			t.Fatalf("ReadFile failed: %v", err)
-		}
-
-		if string(content) != string(testContent) {
-			t.Errorf("expected content %q, got %q", string(testContent), string(content))
-		}
-	})
-
-	t.Run("read non-existent file", func(t *testing.T) {
-		nonExistentFile := filepath.Join(os.TempDir(), "non-existent-file-12345.txt")
-		_, err := fs.ReadFile(nonExistentFile)
-		if err == nil {
-			t.Error("expected error when reading non-existent file")
-		}
-		if !os.IsNotExist(err) {
-			t.Errorf("expected os.IsNotExist error, got %v", err)
-		}
-	})
+	// Test reading non-existent file
+	_, err = fs.ReadFile(filepath.Join(tempDir, "nonexistent.txt"))
+	if err == nil {
+		t.Error("Expected error when reading non-existent file, got nil")
+	}
+	if !os.IsNotExist(err) {
+		t.Errorf("Expected IsNotExist error, got %v", err)
+	}
 }
 
 func TestOSFileSystem_Open(t *testing.T) {
+	// Create a temporary directory for testing
+	tempDir := t.TempDir()
+
+	// Test successful open
+	testContent := "Hello, World!"
+	testFile := filepath.Join(tempDir, "test.txt")
+	err := os.WriteFile(testFile, []byte(testContent), 0o600)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
 	fs := OSFileSystem{}
+	file, err := fs.Open(testFile)
+	if err != nil {
+		t.Errorf("Open failed: %v", err)
+	}
+	defer file.Close()
 
-	t.Run("open existing file", func(t *testing.T) {
-		// Create a temporary file
-		tmpFile, err := os.CreateTemp(t.TempDir(), "test-*.txt")
-		if err != nil {
-			t.Fatalf("failed to create temp file: %v", err)
-		}
-		defer os.Remove(tmpFile.Name())
-		defer tmpFile.Close()
+	// Verify we can read from the opened file
+	data := make([]byte, len(testContent))
+	n, err := file.Read(data)
+	if err != nil {
+		t.Errorf("Failed to read from opened file: %v", err)
+	}
+	if n != len(testContent) {
+		t.Errorf("Expected to read %d bytes, got %d", len(testContent), n)
+	}
+	if string(data) != testContent {
+		t.Errorf("Expected %q, got %q", testContent, string(data))
+	}
 
-		testContent := []byte("test content")
-		if _, err := tmpFile.Write(testContent); err != nil {
-			t.Fatalf("failed to write to temp file: %v", err)
-		}
-		tmpFile.Close()
+	// Test opening non-existent file
+	_, err = fs.Open(filepath.Join(tempDir, "nonexistent.txt"))
+	if err == nil {
+		t.Error("Expected error when opening non-existent file, got nil")
+	}
+	if !os.IsNotExist(err) {
+		t.Errorf("Expected IsNotExist error, got %v", err)
+	}
+}
 
-		// Open the file
-		file, err := fs.Open(tmpFile.Name())
-		if err != nil {
-			t.Fatalf("Open failed: %v", err)
-		}
-		defer file.Close()
+func TestMockFS_ReadFile(t *testing.T) {
+	expectedData := []byte("mock data")
+	expectedErr := os.ErrNotExist
 
-		// Verify we can read from it
-		stat, err := file.Stat()
-		if err != nil {
-			t.Fatalf("Stat failed: %v", err)
-		}
-		if stat.Size() != int64(len(testContent)) {
-			t.Errorf("expected file size %d, got %d", len(testContent), stat.Size())
-		}
-	})
+	mock := MockFS{
+		ReadFileFunc: func(name string) ([]byte, error) {
+			if name == "success.txt" {
+				return expectedData, nil
+			}
+			return nil, expectedErr
+		},
+	}
 
-	t.Run("open non-existent file", func(t *testing.T) {
-		nonExistentFile := filepath.Join(os.TempDir(), "non-existent-file-12345.txt")
-		_, err := fs.Open(nonExistentFile)
-		if err == nil {
-			t.Error("expected error when opening non-existent file")
-		}
-		if !os.IsNotExist(err) {
-			t.Errorf("expected os.IsNotExist error, got %v", err)
-		}
-	})
+	// Test success case
+	data, err := mock.ReadFile("success.txt")
+	if err != nil {
+		t.Errorf("Expected no error, got %v", err)
+	}
+	if string(data) != string(expectedData) {
+		t.Errorf("Expected %q, got %q", expectedData, data)
+	}
+
+	// Test error case
+	_, err = mock.ReadFile("error.txt")
+	if !errors.Is(err, expectedErr) {
+		t.Errorf("Expected error %v, got %v", expectedErr, err)
+	}
+
+	// Test default behavior (no function set)
+	mockDefault := MockFS{}
+	data, err = mockDefault.ReadFile("any.txt")
+	if err != nil {
+		t.Errorf("Expected no error for default mock, got %v", err)
+	}
+	if data != nil {
+		t.Errorf("Expected nil data for default mock, got %v", data)
+	}
+}
+
+func TestMockFS_Open(t *testing.T) {
+	expectedErr := os.ErrNotExist
+
+	mock := MockFS{
+		OpenFunc: func(name string) (fs.File, error) {
+			if name == "error.txt" {
+				return nil, expectedErr
+			}
+			return nil, nil // Mock file (nil for simplicity in tests)
+		},
+	}
+
+	// Test error case
+	_, err := mock.Open("error.txt")
+	if !errors.Is(err, expectedErr) {
+		t.Errorf("Expected error %v, got %v", expectedErr, err)
+	}
+
+	// Test success case (returns nil file for simplicity)
+	file, err := mock.Open("success.txt")
+	if err != nil {
+		t.Errorf("Expected no error, got %v", err)
+	}
+	if file != nil {
+		t.Errorf("Expected nil file for mock, got %v", file)
+	}
+
+	// Test default behavior (no function set)
+	mockDefault := MockFS{}
+	file, err = mockDefault.Open("any.txt")
+	if err != nil {
+		t.Errorf("Expected no error for default mock, got %v", err)
+	}
+	if file != nil {
+		t.Errorf("Expected nil file for default mock, got %v", file)
+	}
+}
+
+func TestFileSystemInterface(_ *testing.T) {
+	// Test that OSFileSystem implements FileSystem interface
+	var _ FileSystem = OSFileSystem{}
+
+	// Test that MockFS implements FileSystem interface
+	var _ FileSystem = MockFS{}
 }

@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-// ProcessSampler samples CPU usage for the current process
-type ProcessSampler struct {
+// windowsProcessSampler samples CPU usage for the current process on Windows
+type windowsProcessSampler struct {
 	pid         int
 	lastUTime   float64
 	lastSTime   float64
@@ -20,20 +20,20 @@ type ProcessSampler struct {
 	lastPercent float64
 }
 
-// newProcessSampler creates a new CPU sampler for the current process (Windows implementation)
-func newProcessSampler() (*ProcessSampler, error) {
+// newPlatformCPUSampler matches the factory signature required by cpu.go.
+func newPlatformCPUSampler(_ FileSystem) (ProcessCPUSampler, error) {
 	pid := os.Getpid()
 	if pid < 0 || pid > math.MaxInt32 {
 		return nil, fmt.Errorf("invalid PID: %d", pid)
 	}
 
-	return &ProcessSampler{
+	return &windowsProcessSampler{
 		pid: pid,
 	}, nil
 }
 
 // Sample returns the CPU usage percentage since the last sample
-func (s *ProcessSampler) Sample(deltaTime time.Duration) float64 {
+func (s *windowsProcessSampler) Sample(deltaTime time.Duration) float64 {
 	utime, stime, err := s.getCurrentCPUTimes()
 	if err != nil {
 		// If we have a previous valid sample, return it; otherwise return 0
@@ -66,8 +66,6 @@ func (s *ProcessSampler) Sample(deltaTime time.Duration) float64 {
 	}
 
 	// Normalized to 0-100% (divides by numCPU for system-wide metric)
-	// Note: GetProcessTimes returns cumulative CPU time across all threads/cores
-	// So we divide by numCPU to get per-core percentage
 	numcpu := runtime.NumCPU()
 	if numcpu <= 0 {
 		numcpu = 1 // Safety check
@@ -91,7 +89,7 @@ func (s *ProcessSampler) Sample(deltaTime time.Duration) float64 {
 }
 
 // Reset clears sampler state for a new session
-func (s *ProcessSampler) Reset() {
+func (s *windowsProcessSampler) Reset() {
 	s.lastUTime = 0.0
 	s.lastSTime = 0.0
 	s.lastSample = time.Time{}
@@ -99,7 +97,7 @@ func (s *ProcessSampler) Reset() {
 }
 
 // IsInitialized returns true if at least one sample has been taken
-func (s *ProcessSampler) IsInitialized() bool {
+func (s *windowsProcessSampler) IsInitialized() bool {
 	return !s.lastSample.IsZero()
 }
 
@@ -107,8 +105,6 @@ func (s *ProcessSampler) IsInitialized() bool {
 func getProcessCPUTimes(pid int) (syscall.Filetime, syscall.Filetime, error) {
 	var c, e, k, u syscall.Filetime
 
-	// For the current process, use GetCurrentProcess() which returns a pseudo-handle
-	// that doesn't need to be opened and is more reliable
 	currentPid := os.Getpid()
 	var h syscall.Handle
 	if pid == currentPid {
@@ -117,11 +113,11 @@ func getProcessCPUTimes(pid int) (syscall.Filetime, syscall.Filetime, error) {
 		if err != nil {
 			return k, u, fmt.Errorf("failed to get current process handle: %w", err)
 		}
-		// GetCurrentProcess returns a pseudo-handle that doesn't need to be closed
 	} else {
 		// Try PROCESS_QUERY_LIMITED_INFORMATION first (works on more Windows versions)
 		// Fall back to PROCESS_QUERY_INFORMATION if that fails
 		var err error
+		// Define constant here since we can't depend on x/sys/windows
 		const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 		h, err = syscall.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
 		if err != nil {
@@ -144,12 +140,14 @@ func getProcessCPUTimes(pid int) (syscall.Filetime, syscall.Filetime, error) {
 
 // convertFiletimeToSeconds converts FILETIME (100ns intervals) to seconds
 func convertFiletimeToSeconds(ft syscall.Filetime) float64 {
+	// Join high/low into single 64-bit integer
 	ticks := int64(ft.HighDateTime)<<32 | int64(ft.LowDateTime)
-	return float64(ticks) * 1e-7 // 1 tick = 100ns
+	// 1 tick = 100ns = 0.0000001 seconds
+	return float64(ticks) * 1e-7
 }
 
 // getCurrentCPUTimes reads CPU times for the process (returns seconds)
-func (s *ProcessSampler) getCurrentCPUTimes() (utime, stime float64, err error) {
+func (s *windowsProcessSampler) getCurrentCPUTimes() (utime, stime float64, err error) {
 	k, u, err := getProcessCPUTimes(s.pid)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to get CPU times for process %d: %w", s.pid, err)

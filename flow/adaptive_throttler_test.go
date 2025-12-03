@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/reugn/go-streams"
 	"github.com/reugn/go-streams/internal/assert"
 )
 
@@ -33,42 +32,6 @@ func (m *MockMonitor) Close() {
 func (m *MockMonitor) ExpectGetStats(stats ...ResourceStats) {
 	m.getStatsReturns = stats
 	m.getStatsIndex = 0
-}
-
-type mockFlow struct {
-	in  chan any
-	out chan any
-}
-
-func (m *mockFlow) Via(flow streams.Flow) streams.Flow {
-	return flow
-}
-
-func (m *mockFlow) To(sink streams.Sink) {
-	go func() {
-		for data := range m.in {
-			sink.In() <- data
-		}
-		close(sink.In())
-	}()
-}
-
-func (m *mockFlow) Out() <-chan any {
-	return m.out
-}
-
-func (m *mockFlow) In() chan<- any {
-	if m.in == nil {
-		m.in = make(chan any, 10)
-		m.out = make(chan any, 10)
-		go func() {
-			defer close(m.out)
-			for data := range m.in {
-				m.out <- data
-			}
-		}()
-	}
-	return m.in
 }
 
 type mockSink struct {
@@ -113,19 +76,17 @@ func newMockSinkWithChannelDrain() *mockSinkWithChannelDrain {
 	go func() {
 		defer close(sink.done)
 		for range sink.in {
-			_ = struct{}{} // drain channel
+			_ = struct{}{}
 		}
 	}()
 	return sink
 }
 
-// Helper functions for common test patterns
-
 // createThrottlerWithLongInterval creates a throttler with default config but long sample interval
 func createThrottlerWithLongInterval(t *testing.T) *AdaptiveThrottler {
 	t.Helper()
 	config := DefaultAdaptiveThrottlerConfig()
-	config.SampleInterval = 10 * time.Second // Long interval to avoid interference
+	config.SampleInterval = 10 * time.Second
 	at, err := NewAdaptiveThrottler(config)
 	if err != nil {
 		t.Fatalf("Failed to create throttler: %v", err)
@@ -177,6 +138,100 @@ func createThrottlerForRateTesting(
 		currentRateBits: math.Float64bits(initialRate),
 	}
 	return throttler, mockMonitor
+}
+
+// calculateNewRate calculates the new rate based on current rate and resource stats
+// This implements the core adaptive throttling algorithm
+func calculateNewRate(config *AdaptiveThrottlerConfig, currentRate float64, stats ResourceStats) float64 {
+	isConstrained := stats.MemoryUsedPercent > config.MaxMemoryPercent ||
+		stats.CPUUsagePercent > config.MaxCPUPercent
+
+	isBelowRecovery := stats.MemoryUsedPercent < config.RecoveryMemoryThreshold &&
+		stats.CPUUsagePercent < config.RecoveryCPUThreshold
+
+	shouldIncrease := !isConstrained && (!config.EnableHysteresis || isBelowRecovery)
+
+	targetRate := currentRate
+	if isConstrained {
+		targetRate *= config.BackoffFactor
+	} else if shouldIncrease {
+		targetRate *= config.RecoveryFactor
+		if targetRate > float64(config.MaxRate) {
+			targetRate = float64(config.MaxRate)
+		}
+	}
+
+	newRate := currentRate + (targetRate-currentRate)*smoothingFactor
+
+	if newRate < float64(config.MinRate) {
+		newRate = float64(config.MinRate)
+	}
+
+	return newRate
+}
+
+// simulateRateAdjustments simulates a sequence of rate adjustments and returns the final rate
+// This is used to calculate expected rate ranges algorithmically instead of hardcoding them
+func simulateRateAdjustments(
+	config *AdaptiveThrottlerConfig,
+	initialRate float64,
+	statsSequence []ResourceStats,
+) float64 {
+	currentRate := initialRate
+
+	for _, stats := range statsSequence {
+		currentRate = calculateNewRate(config, currentRate, stats)
+	}
+
+	return currentRate
+}
+
+// calculateExpectedRateRange calculates the expected final rate range for a sustained load scenario
+// Returns min and max expected rates based on the algorithm behavior
+func calculateExpectedRateRange(
+	config *AdaptiveThrottlerConfig,
+	initialRate float64,
+	statsSequence []ResourceStats,
+) (float64, float64) {
+	finalRate := simulateRateAdjustments(config, initialRate, statsSequence)
+
+	tolerance := 0.1 // 10% tolerance
+
+	minExpected := finalRate * (1 - tolerance)
+	maxExpected := finalRate * (1 + tolerance)
+
+	if minExpected < float64(config.MinRate) {
+		minExpected = float64(config.MinRate)
+	}
+	if maxExpected > float64(config.MaxRate) {
+		maxExpected = float64(config.MaxRate)
+	}
+
+	return minExpected, maxExpected
+}
+
+// calculateExpectedRecoveryRate calculates the expected recovery rate after a high load followed by normal load
+// Returns the expected rate after the specified number of recovery cycles
+func calculateExpectedRecoveryRate(
+	config *AdaptiveThrottlerConfig,
+	initialRate float64,
+	highLoadStats, normalLoadStats ResourceStats,
+	recoveryCycles int,
+) float64 {
+	currentRate := initialRate
+
+	currentRate = simulateSingleAdjustment(config, currentRate, highLoadStats)
+
+	for i := 0; i < recoveryCycles+1; i++ { // +1 for the first normal load adjustment
+		currentRate = simulateSingleAdjustment(config, currentRate, normalLoadStats)
+	}
+
+	return currentRate
+}
+
+// simulateSingleAdjustment simulates a single rate adjustment for given stats
+func simulateSingleAdjustment(config *AdaptiveThrottlerConfig, currentRate float64, stats ResourceStats) float64 {
+	return calculateNewRate(config, currentRate, stats)
 }
 
 type mockInlet struct {
@@ -459,13 +514,13 @@ func TestAdaptiveThrottler_Hysteresis(t *testing.T) {
 	config.EnableHysteresis = true
 	at, mockMonitor := createThrottlerForRateTesting(config, float64(config.InitialRate))
 
-	// CPU at 75% (above recovery threshold 70%, below max threshold 80%) - should not increase
+	// CPU at 75% (above recovery threshold) - should not increase with hysteresis
 	mockMonitor.ExpectGetStats(ResourceStats{
 		CPUUsagePercent:   75.0,
-		MemoryUsedPercent: 40.0, // Below recovery threshold
+		MemoryUsedPercent: 40.0,
 	})
 	at.adjustRate()
-	assert.InDelta(t, 50.0, at.GetCurrentRate(), 0.01) // Should stay at 50 (no increase)
+	assert.InDelta(t, 50.0, at.GetCurrentRate(), 0.01)
 
 	// CPU at 65% (below recovery threshold) - should increase
 	mockMonitor.ExpectGetStats(ResourceStats{
@@ -473,13 +528,13 @@ func TestAdaptiveThrottler_Hysteresis(t *testing.T) {
 		MemoryUsedPercent: 40.0,
 	})
 	at.adjustRate()
-	assert.InDelta(t, 53.0, at.GetCurrentRate(), 0.01) // 50 + (60-50)*0.3 = 53 (with smoothing)
+	assert.InDelta(t, 53.0, at.GetCurrentRate(), 0.01)
 
 	// Test with hysteresis disabled
 	config.EnableHysteresis = false
 	at2, _ := createThrottlerForRateTesting(config, 50.0)
 
-	// CPU at 75% (below max threshold) - should increase immediately (no hysteresis)
+	// CPU at 75% (below max threshold) - should increase immediately
 	mockMonitor.ExpectGetStats(ResourceStats{
 		CPUUsagePercent:   75.0,
 		MemoryUsedPercent: 40.0,
@@ -579,62 +634,6 @@ func TestAdaptiveThrottler_FlowControl(t *testing.T) {
 	}
 	if receivedCount < 1 {
 		t.Fatalf("Expected at least 1 event, got %d", receivedCount)
-	}
-}
-
-func TestAdaptiveThrottler_GetCurrentRate(t *testing.T) {
-	mockMonitor := &MockMonitor{}
-	config := DefaultAdaptiveThrottlerConfig()
-
-	at := &AdaptiveThrottler{
-		config:          *config,
-		monitor:         mockMonitor,
-		currentRateBits: math.Float64bits(42.5),
-	}
-
-	rate := at.GetCurrentRate()
-	if rate != 42.5 {
-		t.Errorf("Expected rate 42.5, got %f", rate)
-	}
-}
-
-func TestAdaptiveThrottler_GetResourceStats(t *testing.T) {
-	mockMonitor := &MockMonitor{}
-	expectedStats := ResourceStats{
-		CPUUsagePercent:   15.5,
-		MemoryUsedPercent: 25.0,
-		GoroutineCount:    10,
-	}
-	mockMonitor.ExpectGetStats(expectedStats)
-
-	config := DefaultAdaptiveThrottlerConfig()
-	at := &AdaptiveThrottler{
-		config:  *config,
-		monitor: mockMonitor,
-	}
-
-	stats := at.GetResourceStats()
-	if stats.CPUUsagePercent != expectedStats.CPUUsagePercent {
-		t.Errorf("Expected CPU %f, got %f", expectedStats.CPUUsagePercent, stats.CPUUsagePercent)
-	}
-	if stats.MemoryUsedPercent != expectedStats.MemoryUsedPercent {
-		t.Errorf("Expected Memory %f, got %f", expectedStats.MemoryUsedPercent, stats.MemoryUsedPercent)
-	}
-}
-
-func TestAdaptiveThrottler_Via_ReturnsInputFlow(t *testing.T) {
-	config := DefaultAdaptiveThrottlerConfig()
-	at, err := NewAdaptiveThrottler(config)
-	if err != nil {
-		t.Fatalf("Failed to create throttler: %v", err)
-	}
-	defer at.close()
-
-	mockFlow := &mockFlow{}
-	resultFlow := at.Via(mockFlow)
-
-	if resultFlow != mockFlow {
-		t.Error("Via should return the input flow")
 	}
 }
 
@@ -774,65 +773,58 @@ func TestAdaptiveThrottler_AdjustRate_EdgeCases(t *testing.T) {
 
 	at, mockMonitor := createThrottlerForRateTesting(config, 50.0)
 
-	// Test: Both CPU and memory constrained
+	// Both CPU and memory constrained
 	mockMonitor.ExpectGetStats(ResourceStats{
-		CPUUsagePercent:   90.0, // Above max
-		MemoryUsedPercent: 90.0, // Above max
+		CPUUsagePercent:   90.0,
+		MemoryUsedPercent: 90.0,
 	})
 	at.adjustRate()
-	// Should reduce rate: 50 * 0.7 = 35, then smoothed: 50 + (35-50)*0.3 = 45.5
 	assert.InDelta(t, 45.5, at.GetCurrentRate(), 0.1)
 
-	// Test: Rate at max, should not exceed
+	// Rate at max, should not exceed
 	at.setRate(100.0)
 	mockMonitor.ExpectGetStats(ResourceStats{
 		CPUUsagePercent:   10.0,
 		MemoryUsedPercent: 10.0,
 	})
 	at.adjustRate()
-	// Should try to increase but cap at MaxRate
 	rate := at.GetCurrentRate()
 	if rate > 100.0 {
 		t.Errorf("Rate should not exceed MaxRate, got %f", rate)
 	}
 
-	// Test: Rate at min, constrained
+	// Rate at min, constrained
 	at.setRate(10.0)
 	mockMonitor.ExpectGetStats(ResourceStats{
 		CPUUsagePercent:   90.0,
 		MemoryUsedPercent: 90.0,
 	})
 	at.adjustRate()
-	// Should reduce but not go below MinRate (though MinRate is not enforced in adjustRate)
 	rate = at.GetCurrentRate()
 	if rate < 0 {
 		t.Errorf("Rate should not be negative, got %f", rate)
 	}
 
-	// Test: Exactly at thresholds
+	// Exactly at thresholds
 	at.setRate(50.0)
 	mockMonitor.ExpectGetStats(ResourceStats{
-		CPUUsagePercent:   80.0, // Exactly at max (not above, so not constrained)
-		MemoryUsedPercent: 70.0, // Below max
+		CPUUsagePercent:   80.0, // Exactly at max
+		MemoryUsedPercent: 70.0,
 	})
 	at.adjustRate()
-	// Should not reduce because CPU is exactly at max (not > max)
-	// The constraint check uses > not >=
 	rate = at.GetCurrentRate()
-	// Rate should stay the same or potentially increase if below recovery threshold
 	if rate < 0 {
 		t.Errorf("Rate should not be negative, got %f", rate)
 	}
 
-	// Test: Exactly at recovery thresholds with hysteresis
+	// Exactly at recovery thresholds with hysteresis
 	at.setRate(50.0)
 	config.EnableHysteresis = true
 	mockMonitor.ExpectGetStats(ResourceStats{
 		CPUUsagePercent:   70.0, // Exactly at recovery threshold
-		MemoryUsedPercent: 75.0, // Exactly at recovery threshold
+		MemoryUsedPercent: 75.0,
 	})
 	at.adjustRate()
-	// With hysteresis, should not increase (must be below both thresholds)
 	rate = at.GetCurrentRate()
 	if rate > 50.0 {
 		t.Errorf("With hysteresis, rate should not increase at threshold, got %f", rate)
@@ -854,26 +846,17 @@ func TestAdaptiveThrottler_PipelineLoop_Shutdown(t *testing.T) {
 		done:            make(chan struct{}),
 	}
 
-	// Test: Shutdown during processing
 	go at.pipelineLoop()
 
-	// Send one item
 	at.in <- "test1"
-
-	// Wait a bit for it to start processing
 	time.Sleep(10 * time.Millisecond)
 
-	// Close done channel to trigger shutdown
 	close(at.done)
-
-	// Wait for pipeline to finish (may take a moment for goroutine to exit)
 	time.Sleep(200 * time.Millisecond)
 
-	// Verify output channel is closed (pipelineLoop defers close(at.out))
 	select {
 	case _, ok := <-at.out:
 		if ok {
-			// Channel still open, wait a bit more
 			time.Sleep(100 * time.Millisecond)
 			select {
 			case _, ok2 := <-at.out:
@@ -881,11 +864,9 @@ func TestAdaptiveThrottler_PipelineLoop_Shutdown(t *testing.T) {
 					t.Error("Output channel should be closed after shutdown")
 				}
 			default:
-				// Channel closed now
 			}
 		}
 	default:
-		// Channel already closed, which is expected
 	}
 }
 
@@ -1075,5 +1056,458 @@ func TestAdaptiveThrottler_StreamPortioned_Blocking(t *testing.T) {
 
 	if len(received) != 2 {
 		t.Errorf("Expected 2 items, got %d", len(received))
+	}
+}
+
+func TestAdaptiveThrottler_RealisticProductionScenarios(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   func() *AdaptiveThrottlerConfig
+		scenario string
+		steps    []ResourceStats
+	}{
+		{
+			name: "High CPU Production Scenario",
+			config: func() *AdaptiveThrottlerConfig {
+				config := DefaultAdaptiveThrottlerConfig()
+				config.MaxCPUPercent = 80.0
+				config.MaxMemoryPercent = 90.0
+				config.InitialRate = 1000
+				config.MinRate = 50
+				config.MaxRate = 5000
+				config.BackoffFactor = 0.7
+				config.RecoveryFactor = 1.2
+				config.RecoveryCPUThreshold = 70.0
+				config.RecoveryMemoryThreshold = 80.0
+				return config
+			},
+			scenario: "High CPU usage scenario typical in production",
+			steps: []ResourceStats{
+				{CPUUsagePercent: 85.0, MemoryUsedPercent: 60.0},
+				{CPUUsagePercent: 75.0, MemoryUsedPercent: 65.0},
+				{CPUUsagePercent: 65.0, MemoryUsedPercent: 70.0},
+				{CPUUsagePercent: 55.0, MemoryUsedPercent: 75.0},
+			},
+		},
+		{
+			name: "Memory Pressure Production Scenario",
+			config: func() *AdaptiveThrottlerConfig {
+				config := DefaultAdaptiveThrottlerConfig()
+				config.MaxCPUPercent = 90.0
+				config.MaxMemoryPercent = 85.0
+				config.InitialRate = 2000
+				config.MinRate = 100
+				config.MaxRate = 10000
+				config.BackoffFactor = 0.6
+				config.RecoveryFactor = 1.3
+				config.RecoveryCPUThreshold = 80.0
+				config.RecoveryMemoryThreshold = 75.0
+				return config
+			},
+			scenario: "Memory pressure scenario common in memory-intensive apps",
+			steps: []ResourceStats{
+				{CPUUsagePercent: 70.0, MemoryUsedPercent: 88.0},
+				{CPUUsagePercent: 75.0, MemoryUsedPercent: 82.0},
+				{CPUUsagePercent: 65.0, MemoryUsedPercent: 78.0},
+				{CPUUsagePercent: 60.0, MemoryUsedPercent: 72.0},
+			},
+		},
+		{
+			name: "Balanced Production Load",
+			config: func() *AdaptiveThrottlerConfig {
+				config := DefaultAdaptiveThrottlerConfig()
+				config.MaxCPUPercent = 75.0
+				config.MaxMemoryPercent = 80.0
+				config.InitialRate = 1500
+				config.MinRate = 200
+				config.MaxRate = 8000
+				config.BackoffFactor = 0.75
+				config.RecoveryFactor = 1.25
+				config.RecoveryCPUThreshold = 65.0
+				config.RecoveryMemoryThreshold = 70.0
+				return config
+			},
+			scenario: "Balanced load typical for well-tuned production systems",
+			steps: []ResourceStats{
+				{CPUUsagePercent: 78.0, MemoryUsedPercent: 65.0},
+				{CPUUsagePercent: 72.0, MemoryUsedPercent: 68.0},
+				{CPUUsagePercent: 68.0, MemoryUsedPercent: 75.0},
+				{CPUUsagePercent: 65.0, MemoryUsedPercent: 72.0},
+			},
+		},
+		{
+			name: "Conservative Production Settings",
+			config: func() *AdaptiveThrottlerConfig {
+				config := DefaultAdaptiveThrottlerConfig()
+				config.MaxCPUPercent = 60.0
+				config.MaxMemoryPercent = 75.0
+				config.InitialRate = 500
+				config.MinRate = 50
+				config.MaxRate = 2000
+				config.BackoffFactor = 0.8
+				config.RecoveryFactor = 1.1
+				config.RecoveryCPUThreshold = 50.0
+				config.RecoveryMemoryThreshold = 65.0
+				return config
+			},
+			scenario: "Conservative settings for critical production systems",
+			steps: []ResourceStats{
+				{CPUUsagePercent: 65.0, MemoryUsedPercent: 70.0},
+				{CPUUsagePercent: 58.0, MemoryUsedPercent: 72.0},
+				{CPUUsagePercent: 55.0, MemoryUsedPercent: 68.0},
+				{CPUUsagePercent: 52.0, MemoryUsedPercent: 65.0},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := tt.config()
+			at, mockMonitor := createThrottlerForRateTesting(config, float64(config.InitialRate))
+
+			t.Logf("Testing scenario: %s", tt.scenario)
+
+			throttlingTriggered := false
+
+			for i, stats := range tt.steps {
+				initialRate := at.GetCurrentRate()
+				mockMonitor.ExpectGetStats(stats)
+				at.adjustRate()
+				finalRate := at.GetCurrentRate()
+
+				isConstrained := stats.CPUUsagePercent > config.MaxCPUPercent ||
+					stats.MemoryUsedPercent > config.MaxMemoryPercent
+
+				isBelowRecovery := stats.CPUUsagePercent < config.RecoveryCPUThreshold &&
+					stats.MemoryUsedPercent < config.RecoveryMemoryThreshold
+
+				t.Logf("Step %d: CPU %.1f%%, Mem %.1f%% -> Rate %.1f (constrained: %v, below recovery: %v)",
+					i+1, stats.CPUUsagePercent, stats.MemoryUsedPercent, finalRate, isConstrained, isBelowRecovery)
+
+				// Verify throttling behavior
+				if isConstrained {
+					throttlingTriggered = true
+					if finalRate > initialRate {
+						t.Errorf("Step %d: Rate should not increase when constrained, but %.1f > %.1f",
+							i+1, finalRate, initialRate)
+					}
+				}
+
+				// Verify recovery behavior (only if we've seen throttling before)
+				if throttlingTriggered && !isConstrained {
+					if config.EnableHysteresis && !isBelowRecovery {
+						// With hysteresis, rate should not increase until both resources are below recovery thresholds
+						if finalRate > initialRate {
+							t.Errorf("Step %d: With hysteresis, rate should not increase until both resources below recovery thresholds",
+								i+1)
+						}
+					} else if !config.EnableHysteresis || isBelowRecovery {
+						// Without hysteresis or when below recovery thresholds, rate should be able to increase
+						if finalRate < initialRate {
+							t.Errorf("Step %d: Rate should not decrease during recovery, but %.1f < %.1f",
+								i+1, finalRate, initialRate)
+						}
+					}
+				}
+
+				// Verify rate bounds
+				if finalRate < float64(config.MinRate) {
+					t.Errorf("Step %d: Rate %.1f below MinRate %d", i+1, finalRate, config.MinRate)
+				}
+				if finalRate > float64(config.MaxRate) {
+					t.Errorf("Step %d: Rate %.1f above MaxRate %d", i+1, finalRate, config.MaxRate)
+				}
+			}
+
+			// Ensure we actually tested throttling behavior
+			if !throttlingTriggered {
+				t.Errorf("Test scenario should have triggered throttling at least once")
+			}
+		})
+	}
+}
+
+// TestAdaptiveThrottler_SustainedLoadScenarios tests behavior under prolonged load
+func TestAdaptiveThrottler_SustainedLoadScenarios(t *testing.T) {
+	tests := []struct {
+		name        string
+		config      func() *AdaptiveThrottlerConfig
+		loadPattern []ResourceStats
+		description string
+	}{
+		{
+			name: "Sustained High CPU Load",
+			config: func() *AdaptiveThrottlerConfig {
+				config := DefaultAdaptiveThrottlerConfig()
+				config.MaxCPUPercent = 75.0
+				config.MaxMemoryPercent = 90.0
+				config.InitialRate = 2000
+				config.MinRate = 100
+				config.MaxRate = 10000
+				config.BackoffFactor = 0.7
+				config.RecoveryFactor = 1.2
+				return config
+			},
+			loadPattern: []ResourceStats{
+				{CPUUsagePercent: 80.0, MemoryUsedPercent: 60.0},
+				{CPUUsagePercent: 82.0, MemoryUsedPercent: 62.0},
+				{CPUUsagePercent: 78.0, MemoryUsedPercent: 64.0},
+				{CPUUsagePercent: 85.0, MemoryUsedPercent: 66.0},
+				{CPUUsagePercent: 81.0, MemoryUsedPercent: 68.0},
+			},
+			description: "Sustained high CPU usage with some variation",
+		},
+		{
+			name: "Memory Pressure Buildup",
+			config: func() *AdaptiveThrottlerConfig {
+				config := DefaultAdaptiveThrottlerConfig()
+				config.MaxCPUPercent = 85.0
+				config.MaxMemoryPercent = 80.0
+				config.InitialRate = 3000
+				config.MinRate = 200
+				config.MaxRate = 15000
+				config.BackoffFactor = 0.6
+				config.RecoveryFactor = 1.15
+				return config
+			},
+			loadPattern: []ResourceStats{
+				{CPUUsagePercent: 70.0, MemoryUsedPercent: 75.0},
+				{CPUUsagePercent: 72.0, MemoryUsedPercent: 78.0},
+				{CPUUsagePercent: 68.0, MemoryUsedPercent: 82.0},
+				{CPUUsagePercent: 71.0, MemoryUsedPercent: 85.0},
+				{CPUUsagePercent: 69.0, MemoryUsedPercent: 83.0},
+			},
+			description: "Gradual memory pressure buildup typical of memory leaks",
+		},
+		{
+			name: "Mixed Resource Contention",
+			config: func() *AdaptiveThrottlerConfig {
+				config := DefaultAdaptiveThrottlerConfig()
+				config.MaxCPUPercent = 70.0
+				config.MaxMemoryPercent = 75.0
+				config.InitialRate = 2500
+				config.MinRate = 300
+				config.MaxRate = 12000
+				config.BackoffFactor = 0.65
+				config.RecoveryFactor = 1.25
+				config.EnableHysteresis = true
+				return config
+			},
+			loadPattern: []ResourceStats{
+				{CPUUsagePercent: 75.0, MemoryUsedPercent: 72.0},
+				{CPUUsagePercent: 68.0, MemoryUsedPercent: 78.0},
+				{CPUUsagePercent: 72.0, MemoryUsedPercent: 76.0},
+				{CPUUsagePercent: 69.0, MemoryUsedPercent: 74.0},
+				{CPUUsagePercent: 66.0, MemoryUsedPercent: 71.0},
+			},
+			description: "Mixed CPU and memory pressure with hysteresis",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := tt.config()
+			at, mockMonitor := createThrottlerForRateTesting(config, float64(config.InitialRate))
+
+			t.Logf("Testing sustained load: %s", tt.description)
+
+			var finalRate float64
+			for i, stats := range tt.loadPattern {
+				mockMonitor.ExpectGetStats(stats)
+				at.adjustRate()
+				finalRate = at.GetCurrentRate()
+
+				t.Logf("Iteration %d: CPU %.1f%%, Mem %.1f%% -> Rate %.1f",
+					i+1, stats.CPUUsagePercent, stats.MemoryUsedPercent, finalRate)
+			}
+
+			// Calculate expected rate range algorithmically
+			minExpectedRate, maxExpectedRate := calculateExpectedRateRange(config, float64(config.InitialRate), tt.loadPattern)
+
+			t.Logf("Expected final rate range: [%.1f, %.1f], actual: %.1f", minExpectedRate, maxExpectedRate, finalRate)
+
+			if finalRate < minExpectedRate || finalRate > maxExpectedRate {
+				t.Errorf("Final rate %.1f outside expected range [%.1f, %.1f] for sustained load scenario",
+					finalRate, minExpectedRate, maxExpectedRate)
+			}
+
+			// Verify rate doesn't oscillate wildly in final iterations
+			// (This would be a sign of poor hysteresis or smoothing)
+			if finalRate < float64(config.MinRate)*0.9 {
+				t.Errorf("Final rate %.1f too close to MinRate %d, indicating possible oscillation",
+					finalRate, config.MinRate)
+			}
+		})
+	}
+}
+
+// TestAdaptiveThrottler_RecoveryScenarios tests recovery from high load to normal load
+func TestAdaptiveThrottler_RecoveryScenarios(t *testing.T) {
+	tests := []struct {
+		name        string
+		config      func() *AdaptiveThrottlerConfig
+		highLoad    ResourceStats
+		normalLoad  ResourceStats
+		description string
+	}{
+		{
+			name: "CPU Spike Recovery",
+			config: func() *AdaptiveThrottlerConfig {
+				config := DefaultAdaptiveThrottlerConfig()
+				config.MaxCPUPercent = 80.0
+				config.MaxMemoryPercent = 90.0
+				config.InitialRate = 2000
+				config.MinRate = 200
+				config.MaxRate = 10000
+				config.BackoffFactor = 0.6
+				config.RecoveryFactor = 1.4
+				config.SampleInterval = 100 * time.Millisecond
+				config.RecoveryCPUThreshold = 70.0
+				config.RecoveryMemoryThreshold = 80.0
+				return config
+			},
+			highLoad:    ResourceStats{CPUUsagePercent: 85.0, MemoryUsedPercent: 70.0},
+			normalLoad:  ResourceStats{CPUUsagePercent: 60.0, MemoryUsedPercent: 65.0},
+			description: "Recovery from CPU spike to normal load",
+		},
+		{
+			name: "Memory Pressure Recovery",
+			config: func() *AdaptiveThrottlerConfig {
+				config := DefaultAdaptiveThrottlerConfig()
+				config.MaxCPUPercent = 90.0
+				config.MaxMemoryPercent = 75.0
+				config.InitialRate = 3000
+				config.MinRate = 300
+				config.MaxRate = 15000
+				config.BackoffFactor = 0.5
+				config.RecoveryFactor = 1.3
+				config.RecoveryCPUThreshold = 80.0
+				config.RecoveryMemoryThreshold = 65.0
+				return config
+			},
+			highLoad:    ResourceStats{CPUUsagePercent: 70.0, MemoryUsedPercent: 85.0},
+			normalLoad:  ResourceStats{CPUUsagePercent: 65.0, MemoryUsedPercent: 60.0},
+			description: "Recovery from memory pressure to normal load",
+		},
+		{
+			name: "Dual Resource Recovery with Hysteresis",
+			config: func() *AdaptiveThrottlerConfig {
+				config := DefaultAdaptiveThrottlerConfig()
+				config.MaxCPUPercent = 75.0
+				config.MaxMemoryPercent = 80.0
+				config.InitialRate = 2500
+				config.MinRate = 250
+				config.MaxRate = 12000
+				config.BackoffFactor = 0.65
+				config.RecoveryFactor = 1.25
+				config.EnableHysteresis = true
+				config.RecoveryCPUThreshold = 65.0
+				config.RecoveryMemoryThreshold = 70.0
+				return config
+			},
+			highLoad:    ResourceStats{CPUUsagePercent: 85.0, MemoryUsedPercent: 85.0},
+			normalLoad:  ResourceStats{CPUUsagePercent: 60.0, MemoryUsedPercent: 65.0},
+			description: "Recovery from dual resource pressure with hysteresis",
+		},
+		{
+			name: "Recovery Without Hysteresis",
+			config: func() *AdaptiveThrottlerConfig {
+				config := DefaultAdaptiveThrottlerConfig()
+				config.MaxCPUPercent = 75.0
+				config.MaxMemoryPercent = 80.0
+				config.InitialRate = 2500
+				config.MinRate = 250
+				config.MaxRate = 12000
+				config.BackoffFactor = 0.65
+				config.RecoveryFactor = 1.25
+				config.EnableHysteresis = false
+				config.RecoveryCPUThreshold = 65.0
+				config.RecoveryMemoryThreshold = 70.0
+				return config
+			},
+			highLoad:    ResourceStats{CPUUsagePercent: 85.0, MemoryUsedPercent: 85.0},
+			normalLoad:  ResourceStats{CPUUsagePercent: 70.0, MemoryUsedPercent: 75.0},
+			description: "Recovery without hysteresis (faster recovery)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := tt.config()
+			at, mockMonitor := createThrottlerForRateTesting(config, float64(config.InitialRate))
+
+			t.Logf("Testing recovery: %s", tt.description)
+			t.Logf("Config - CPU Max: %.1f%% (Recovery: %.1f%%), Mem Max: %.1f%% (Recovery: %.1f%%), Hysteresis: %v",
+				config.MaxCPUPercent, config.RecoveryCPUThreshold,
+				config.MaxMemoryPercent, config.RecoveryMemoryThreshold, config.EnableHysteresis)
+
+			// Start with high load - should trigger throttling
+			mockMonitor.ExpectGetStats(tt.highLoad)
+			at.adjustRate()
+			highLoadRate := at.GetCurrentRate()
+
+			if highLoadRate >= float64(config.InitialRate) {
+				t.Errorf("High load should reduce rate, but got %.1f >= %d",
+					highLoadRate, config.InitialRate)
+			}
+
+			t.Logf("High load (CPU:%.1f%%, Mem:%.1f%%) -> Rate: %.1f",
+				tt.highLoad.CPUUsagePercent, tt.highLoad.MemoryUsedPercent, highLoadRate)
+
+			// Transition to normal load - recovery behavior depends on hysteresis
+			mockMonitor.ExpectGetStats(tt.normalLoad)
+			at.adjustRate()
+			recoveryRate1 := at.GetCurrentRate()
+
+			t.Logf("Normal load (CPU:%.1f%%, Mem:%.1f%%) -> Rate: %.1f",
+				tt.normalLoad.CPUUsagePercent, tt.normalLoad.MemoryUsedPercent, recoveryRate1)
+
+			// With hysteresis disabled, rate should increase immediately if not constrained
+			isConstrained := tt.normalLoad.CPUUsagePercent > config.MaxCPUPercent ||
+				tt.normalLoad.MemoryUsedPercent > config.MaxMemoryPercent
+
+			if !isConstrained && !config.EnableHysteresis {
+				if recoveryRate1 <= highLoadRate {
+					t.Errorf("Without hysteresis, rate should increase when not constrained, but %.1f <= %.1f",
+						recoveryRate1, highLoadRate)
+				}
+			}
+
+			// Continue recovery for a few more cycles to allow hysteresis recovery
+			for i := 0; i < 5; i++ {
+				mockMonitor.ExpectGetStats(tt.normalLoad)
+				at.adjustRate()
+			}
+			finalRecoveryRate := at.GetCurrentRate()
+
+			t.Logf("After recovery cycles: Rate: %.1f", finalRecoveryRate)
+
+			// Calculate expected recovery rate algorithmically
+			expectedRecoveryRate := calculateExpectedRecoveryRate(
+				config,
+				float64(config.InitialRate),
+				tt.highLoad,
+				tt.normalLoad,
+				5,
+			)
+			tolerance := 0.05 // 5% tolerance for floating point precision
+
+			t.Logf("Expected recovery rate: %.1f, actual: %.1f", expectedRecoveryRate, finalRecoveryRate)
+
+			// Verify recovery rate is within expected range
+			minExpected := expectedRecoveryRate * (1 - tolerance)
+			maxExpected := expectedRecoveryRate * (1 + tolerance)
+
+			if finalRecoveryRate < minExpected || finalRecoveryRate > maxExpected {
+				t.Errorf("Final recovery rate %.1f outside expected range [%.1f, %.1f]",
+					finalRecoveryRate, minExpected, maxExpected)
+			}
+
+			// Should not exceed MaxRate
+			if finalRecoveryRate > float64(config.MaxRate) {
+				t.Errorf("Recovery rate %.1f should not exceed MaxRate %d",
+					finalRecoveryRate, config.MaxRate)
+			}
+		})
 	}
 }

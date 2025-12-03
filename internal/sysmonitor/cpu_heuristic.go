@@ -19,18 +19,21 @@ const (
 	CPUHeuristicMaxCPU = 95.0
 )
 
-// GoroutineHeuristicSampler uses goroutine count as a CPU usage proxy
+// GoroutineHeuristicSampler uses goroutine count as a CPU usage proxy.
+// It implements the ProcessCPUSampler interface.
 type GoroutineHeuristicSampler struct{}
 
-// NewGoroutineHeuristicSampler creates a new heuristic CPU sampler
-func NewGoroutineHeuristicSampler() ProcessCPUSampler {
+// NewGoroutineHeuristicSampler creates a new heuristic CPU sampler.
+func NewGoroutineHeuristicSampler() *GoroutineHeuristicSampler {
 	return &GoroutineHeuristicSampler{}
 }
 
 // Verify implementation of ProcessCPUSampler interface
 var _ ProcessCPUSampler = &GoroutineHeuristicSampler{}
 
-// Sample returns the CPU usage percentage over the given time delta
+// Sample returns the CPU usage percentage over the given time delta.
+// Since this is a heuristic, the 'delta' argument is ignored as the
+// calculation is based on instantaneous state (goroutine count).
 func (s *GoroutineHeuristicSampler) Sample(_ time.Duration) float64 {
 	// Uses logarithmic scaling for more realistic CPU estimation
 	// Base level: 1-10 goroutines = baseline CPU usage (10-20%)
@@ -57,12 +60,15 @@ func (s *GoroutineHeuristicSampler) Sample(_ time.Duration) float64 {
 	return estimatedCPU
 }
 
-// Reset prepares the sampler for a new sampling session
+// Reset prepares the sampler for a new sampling session.
+// No-op for the heuristic sampler as it has no state.
 func (s *GoroutineHeuristicSampler) Reset() {
 	// No state to reset for heuristic sampler
+	_ = s
 }
 
-// IsInitialized returns true if the sampler has been initialized with at least one sample
+// IsInitialized returns true if the sampler has been initialized.
+// Always true for heuristic sampler as it needs no baseline.
 func (s *GoroutineHeuristicSampler) IsInitialized() bool {
 	return true
 }

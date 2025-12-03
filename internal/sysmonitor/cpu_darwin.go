@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-// ProcessSampler samples CPU usage for the current process
-type ProcessSampler struct {
+// darwinProcessSampler samples CPU usage for the current process on macOS
+type darwinProcessSampler struct {
 	pid         int
 	lastUTime   float64
 	lastSTime   float64
@@ -20,20 +20,20 @@ type ProcessSampler struct {
 	lastPercent float64
 }
 
-// newProcessSampler creates a new CPU sampler for the current process
-func newProcessSampler() (*ProcessSampler, error) {
+// newPlatformCPUSampler matches the factory signature required by cpu.go.
+func newPlatformCPUSampler(_ FileSystem) (ProcessCPUSampler, error) {
 	pid := os.Getpid()
 	if pid < 0 || pid > math.MaxInt32 {
 		return nil, fmt.Errorf("invalid PID: %d", pid)
 	}
 
-	return &ProcessSampler{
+	return &darwinProcessSampler{
 		pid: pid,
 	}, nil
 }
 
 // Sample returns the CPU usage percentage since the last sample
-func (s *ProcessSampler) Sample(deltaTime time.Duration) float64 {
+func (s *darwinProcessSampler) Sample(deltaTime time.Duration) float64 {
 	utime, stime, err := s.readProcessTimesDarwin()
 	if err != nil {
 		return s.lastPercent
@@ -84,7 +84,7 @@ func (s *ProcessSampler) Sample(deltaTime time.Duration) float64 {
 }
 
 // Reset clears sampler state for a new session
-func (s *ProcessSampler) Reset() {
+func (s *darwinProcessSampler) Reset() {
 	s.lastUTime = 0
 	s.lastSTime = 0
 	s.lastSample = time.Time{}
@@ -92,18 +92,20 @@ func (s *ProcessSampler) Reset() {
 }
 
 // IsInitialized returns true if at least one sample has been taken
-func (s *ProcessSampler) IsInitialized() bool {
+func (s *darwinProcessSampler) IsInitialized() bool {
 	return !s.lastSample.IsZero()
 }
 
 // readProcessTimesDarwin reads CPU times via syscall.Getrusage (returns seconds)
-func (s *ProcessSampler) readProcessTimesDarwin() (utime, stime float64, err error) {
+func (s *darwinProcessSampler) readProcessTimesDarwin() (utime, stime float64, err error) {
 	var rusage syscall.Rusage
+
 	err = syscall.Getrusage(syscall.RUSAGE_SELF, &rusage)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to get process resource usage: %w", err)
 	}
 
+	// Convert Timeval (Sec/Usec) to float64 seconds
 	utime = float64(rusage.Utime.Sec) + float64(rusage.Utime.Usec)/1e6
 	stime = float64(rusage.Stime.Sec) + float64(rusage.Stime.Usec)/1e6
 	return utime, stime, nil

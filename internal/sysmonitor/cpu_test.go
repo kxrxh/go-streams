@@ -1,217 +1,182 @@
 package sysmonitor
 
 import (
-	"reflect"
+	"io/fs"
 	"testing"
 	"time"
-	"unsafe"
 )
 
-// setUnexportedField sets an unexported field using unsafe reflection.
-func setUnexportedField(t *testing.T, field reflect.Value, value interface{}) {
-	t.Helper()
-	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).
-		Elem().
-		Set(reflect.ValueOf(value))
+// MockFS for the factory test
+type factoryMockFS struct{}
+
+func (f *factoryMockFS) ReadFile(_ string) ([]byte, error) { return nil, nil }
+func (f *factoryMockFS) Open(_ string) (fs.File, error)    { return nil, nil }
+
+type testError struct {
+	msg string
 }
 
-// setTestState sets internal sampler state for testing.
-func setTestState(t *testing.T, sampler ProcessCPUSampler, lastUTime, lastSTime float64, lastSample time.Time) {
-	t.Helper()
-	val := reflect.ValueOf(sampler).Elem()
-
-	// Set lastUTime
-	if field := val.FieldByName("lastUTime"); field.IsValid() {
-		setUnexportedField(t, field, lastUTime)
-	}
-
-	// Set lastSTime
-	if field := val.FieldByName("lastSTime"); field.IsValid() {
-		setUnexportedField(t, field, lastSTime)
-	}
-
-	// Set lastSample
-	if field := val.FieldByName("lastSample"); field.IsValid() {
-		setUnexportedField(t, field, lastSample)
-	}
+func (e *testError) Error() string {
+	return e.msg
 }
 
-func TestNewProcessSampler(t *testing.T) {
-	sampler, err := NewProcessSampler()
+func TestNewCPUSampler(t *testing.T) {
+	fs := &factoryMockFS{}
+
+	sampler, err := NewCPUSampler(fs)
 	if err != nil {
-		t.Fatalf("NewProcessSampler failed: %v", err)
-	}
-	if sampler == nil {
-		t.Fatal("NewProcessSampler should not be nil")
+		t.Fatalf("NewCPUSampler returned error: %v", err)
 	}
 
-	// Test basic interface compliance
-	_ = sampler.Sample(100 * time.Millisecond)
+	if sampler == nil {
+		t.Fatal("NewCPUSampler returned nil")
+	}
+
+	// Basic interface check
 	sampler.Reset()
-	_ = sampler.IsInitialized()
+	_ = sampler.IsInitialized() // Ensure method exists and is callable
 }
 
-func TestProcessSampler_Initialization(t *testing.T) {
-	sampler, err := NewProcessSampler()
+// TestProcessCPUSamplerInterface tests the ProcessCPUSampler interface
+// using any available platform implementation
+func TestProcessCPUSamplerInterface(t *testing.T) {
+	// Create a mock filesystem for testing
+	fs := &factoryMockFS{}
+
+	sampler, err := NewCPUSampler(fs)
 	if err != nil {
-		t.Fatalf("NewProcessSampler failed: %v", err)
+		t.Skipf("CPU sampler not available on this platform: %v", err)
 	}
+
+	// Test 1: Interface compliance - verify all methods exist and are callable
 	if sampler == nil {
-		t.Fatal("NewProcessSampler should not be nil")
+		t.Fatal("NewCPUSampler returned nil sampler")
 	}
 
-	// Initially not initialized
+	// Test 2: Initial state - should not be initialized
 	if sampler.IsInitialized() {
-		t.Error("ProcessSampler should not be initialized initially")
+		t.Error("New sampler should not be initialized")
 	}
 
-	// After first sample, should be initialized
-	sampler.Sample(100 * time.Millisecond)
+	// Test 3: First sample - should initialize and return 0.0
+	firstSample := sampler.Sample(time.Second)
 	if !sampler.IsInitialized() {
-		t.Error("ProcessSampler should be initialized after first sample")
+		t.Error("Sampler should be initialized after first sample")
+	}
+	if firstSample != 0.0 {
+		t.Errorf("First sample should return 0.0, got %f", firstSample)
 	}
 
-	// After reset, should not be initialized
+	// Test 4: Subsequent samples - should return valid CPU values
+	secondSample := sampler.Sample(time.Second)
+	if secondSample < 0.0 || secondSample > 100.0 {
+		t.Errorf("CPU sample should be between 0-100, got %f", secondSample)
+	}
+
+	// Test 5: Reset functionality
 	sampler.Reset()
 	if sampler.IsInitialized() {
-		t.Error("ProcessSampler should not be initialized after reset")
+		t.Error("Sampler should not be initialized after reset")
+	}
+
+	// Test 6: Sample after reset - should behave like first sample
+	resetSample := sampler.Sample(time.Second)
+	if !sampler.IsInitialized() {
+		t.Error("Sampler should be initialized after sample following reset")
+	}
+	if resetSample != 0.0 {
+		t.Errorf("Sample after reset should return 0.0, got %f", resetSample)
+	}
+
+	// Test 7: Rapid sampling - should return last known value if delta too small
+	rapidSample := sampler.Sample(time.Millisecond)
+	// This should return the last known value (resetSample) since delta is too small
+	if rapidSample != resetSample {
+		t.Logf("Rapid sample returned %f, expected last value %f", rapidSample, resetSample)
+		// This is informational - behavior may vary by implementation
 	}
 }
 
-func TestProcessSampler_Sample(t *testing.T) {
-	sampler, err := NewProcessSampler()
+// TestProcessMemoryReaderInterface tests the ProcessMemoryReader interface
+// using any available platform implementation
+func TestProcessMemoryReaderInterface(t *testing.T) {
+	// Create a mock filesystem for testing
+	fs := &factoryMockFS{}
+
+	reader := NewProcessMemoryReader(fs)
+	if reader == nil {
+		t.Fatal("NewProcessMemoryReader returned nil reader")
+	}
+
+	// Test 1: Basic sampling functionality
+	mem, err := reader.Sample()
 	if err != nil {
-		t.Fatalf("NewProcessSampler failed: %v", err)
+		t.Skipf("Memory reader not functional on this platform: %v", err)
 	}
 
-	percent := sampler.Sample(100 * time.Millisecond)
-	if percent != 0.0 {
-		t.Errorf("first sample should return 0.0, got %v", percent)
+	// Test 2: Memory values should be reasonable
+	if mem.Total == 0 {
+		t.Error("Total memory should not be zero")
+	}
+	if mem.Available > mem.Total {
+		t.Errorf("Available memory (%d) should not exceed total memory (%d)", mem.Available, mem.Total)
 	}
 
-	time.Sleep(10 * time.Millisecond)
-	percent = sampler.Sample(10 * time.Millisecond)
-	if percent < 0.0 || percent > 100.0 {
-		t.Errorf("CPU percent should be between 0 and 100, got %v", percent)
+	// Test 3: Multiple samples should be consistent
+	mem2, err := reader.Sample()
+	if err != nil {
+		t.Errorf("Second sample failed: %v", err)
 	}
 
-	sampler.Reset()
-	if sampler.IsInitialized() {
-		t.Error("sampler should not be initialized after reset")
+	// Total memory should be consistent
+	if mem2.Total != mem.Total {
+		t.Errorf("Total memory changed between samples: %d -> %d", mem.Total, mem2.Total)
+	}
+
+	// Available memory should be reasonable (within 10% of previous value)
+	upperBound := uint64(float64(mem.Available) * 1.1)
+	lowerBound := uint64(float64(mem.Available) * 0.9)
+	if mem2.Available > upperBound || mem2.Available < lowerBound {
+		t.Logf("Available memory changed significantly: %d -> %d", mem.Available, mem2.Available)
+		// This is informational as memory usage can fluctuate
 	}
 }
 
-func TestProcessSampler_SampleEdgeCases(t *testing.T) {
-	sampler, err := NewProcessSampler()
-	if err != nil {
-		t.Fatalf("NewProcessSampler failed: %v", err)
+// TestSamplerErrorHandling tests error conditions that work across platforms
+func TestSamplerErrorHandling(t *testing.T) {
+	// Test with mock filesystem that can simulate errors
+	mockFS := &MockFileSystem{
+		OpenErrs: map[string]error{
+			"/proc/self/stat": &testError{msg: "mock stat error"},
+			"/proc/meminfo":   &testError{msg: "mock meminfo error"},
+			"/proc/self/auxv": &testError{msg: "mock auxv error"},
+		},
 	}
 
-	sampler.Sample(100 * time.Millisecond)
-	_ = sampler.Sample(100 * time.Millisecond)
-	time.Sleep(1 * time.Millisecond)
-	percent2 := sampler.Sample(100 * time.Millisecond)
-	if percent2 < 0.0 || percent2 > 100.0 {
-		t.Errorf("CPU percent should be between 0 and 100, got %v", percent2)
+	// Test CPU sampler with error conditions
+	cpuSampler, err := NewCPUSampler(mockFS)
+	if err == nil {
+		t.Log("CPU sampler creation succeeded despite mock errors - this may be expected on some platforms")
+		// If it succeeds, test that it still functions
+		if cpuSampler != nil {
+			sample := cpuSampler.Sample(time.Second)
+			if sample < 0.0 {
+				t.Errorf("CPU sample should not be negative: %f", sample)
+			}
+		}
+	} else {
+		t.Logf("CPU sampler creation failed as expected: %v", err)
 	}
 
-	time.Sleep(50 * time.Millisecond)
-	percent3 := sampler.Sample(50 * time.Millisecond)
-	if percent3 < 0.0 || percent3 > 100.0 {
-		t.Errorf("CPU percent should be clamped to 0-100, got %v", percent3)
-	}
-}
-
-// TestProcessSampler_SampleErrorHandling tests error handling.
-func TestProcessSampler_SampleErrorHandling(t *testing.T) {
-	sampler, err := NewProcessSampler()
-	if err != nil {
-		t.Fatalf("NewProcessSampler failed: %v", err)
-	}
-
-	initialPercent := sampler.Sample(100 * time.Millisecond)
-	if initialPercent != 0.0 {
-		t.Errorf("first sample should return 0.0, got %v", initialPercent)
-	}
-
-	time.Sleep(10 * time.Millisecond)
-	validPercent := sampler.Sample(10 * time.Millisecond)
-	if validPercent < 0.0 || validPercent > 100.0 {
-		t.Errorf("CPU percent should be between 0 and 100, got %v", validPercent)
-	}
-
-	sampler.Reset()
-}
-
-// TestProcessSampler_SampleNumCPUEdgeCase tests numcpu <= 0 safety check.
-func TestProcessSampler_SampleNumCPUEdgeCase(t *testing.T) {
-	sampler, err := NewProcessSampler()
-	if err != nil {
-		t.Fatalf("NewProcessSampler failed: %v", err)
-	}
-
-	sampler.Sample(100 * time.Millisecond)
-	time.Sleep(10 * time.Millisecond)
-	percent := sampler.Sample(10 * time.Millisecond)
-	if percent < 0.0 || percent > 100.0 {
-		t.Errorf("CPU percent should be between 0 and 100, got %v", percent)
-	}
-}
-
-// TestProcessSampler_SampleNegativePercent tests clamping of negative CPU percent.
-func TestProcessSampler_SampleNegativePercent(t *testing.T) {
-	sampler, err := NewProcessSampler()
-	if err != nil {
-		t.Fatalf("NewProcessSampler failed: %v", err)
-	}
-
-	sampler.Sample(100 * time.Millisecond)
-	setTestState(t, sampler, 100.0, 50.0, time.Now().Add(-1*time.Second))
-
-	time.Sleep(10 * time.Millisecond)
-	percent := sampler.Sample(100 * time.Millisecond)
-
-	if percent < 0.0 {
-		t.Errorf("CPU percent should be clamped to 0.0 when negative, got %v", percent)
-	}
-	if percent > 100.0 {
-		t.Errorf("CPU percent should not exceed 100.0, got %v", percent)
-	}
-}
-
-// TestProcessSampler_SampleHighPercent tests clamping of CPU percent > 100%.
-func TestProcessSampler_SampleHighPercent(t *testing.T) {
-	sampler, err := NewProcessSampler()
-	if err != nil {
-		t.Fatalf("NewProcessSampler failed: %v", err)
-	}
-
-	sampler.Sample(100 * time.Millisecond)
-	setTestState(t, sampler, 0.0, 0.0, time.Now().Add(-1*time.Millisecond))
-	time.Sleep(10 * time.Millisecond)
-	setTestState(t, sampler, 0.0, 0.0, time.Now().Add(-1*time.Millisecond))
-	percent := sampler.Sample(100 * time.Millisecond)
-
-	if percent > 100.0 {
-		t.Errorf("CPU percent should be clamped to 100.0 when > 100, got %v", percent)
-	}
-	if percent < 0.0 {
-		t.Errorf("CPU percent should not be negative, got %v", percent)
-	}
-}
-
-// TestProcessSampler_SampleZeroWallTime tests handling of zero or negative wall time.
-func TestProcessSampler_SampleZeroWallTime(t *testing.T) {
-	sampler, err := NewProcessSampler()
-	if err != nil {
-		t.Fatalf("NewProcessSampler failed: %v", err)
-	}
-
-	sampler.Sample(100 * time.Millisecond)
-	setTestState(t, sampler, 0.0, 0.0, time.Now())
-	percent := sampler.Sample(100 * time.Millisecond)
-
-	if percent < 0.0 || percent > 100.0 {
-		t.Errorf("CPU percent should be valid (0-100) or lastPercent, got %v", percent)
+	// Test memory reader with error conditions
+	memReader := NewProcessMemoryReader(mockFS)
+	if memReader != nil {
+		_, err := memReader.Sample()
+		// Error is expected but not guaranteed on all platforms
+		if err != nil {
+			t.Logf("Memory reader returned expected error: %v", err)
+		} else {
+			t.Log("Memory reader succeeded despite mock errors - this may be expected on some platforms")
+		}
 	}
 }

@@ -1,32 +1,25 @@
-//go:build !linux && !windows && (!darwin || (darwin && !cgo))
+//go:build !linux && !windows && (!darwin || !cgo)
 
 package sysmonitor
 
 import (
 	"errors"
 	"runtime"
-	"sync"
 )
 
-var (
-	// memoryReader is nil on unsupported platforms
-	memoryReader MemoryReader
-	// memoryReaderMu protects concurrent access to memoryReader
-	memoryReaderMu sync.RWMutex
-)
+// fallbackMemoryReader is a placeholder for unsupported platforms.
+type fallbackMemoryReader struct{}
 
-// GetSystemMemory returns an error on unsupported platforms.
-func GetSystemMemory() (SystemMemory, error) {
-	memoryReaderMu.RLock()
-	reader := memoryReader
-	memoryReaderMu.RUnlock()
+// newPlatformMemoryReader is the factory entry point.
+func newPlatformMemoryReader(_ FileSystem) ProcessMemoryReader {
+	return &fallbackMemoryReader{}
+}
 
-	if reader != nil {
-		return reader()
-	}
-
+// Sample returns an error indicating that memory monitoring is not supported.
+func (f *fallbackMemoryReader) Sample() (SystemMemory, error) {
 	if runtime.GOOS == "darwin" {
-		return SystemMemory{}, errors.New("memory monitoring not supported on this platform without cgo")
+		// Darwin memory monitoring is not supported on platforms that don't have CGO enabled.
+		return SystemMemory{}, errors.New("memory monitoring on Darwin requires CGO_ENABLED=1")
 	}
 	return SystemMemory{}, errors.New("memory monitoring not supported on this platform")
 }
