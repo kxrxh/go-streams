@@ -437,7 +437,7 @@ func TestNewAdaptiveThrottler(t *testing.T) {
 	if at1.config.InitialRate != 1000 {
 		t.Errorf("Expected default InitialRate 1000, got %d", at1.config.InitialRate)
 	}
-	at1.close()
+	at1.Close()
 
 	config := DefaultAdaptiveThrottlerConfig()
 	config.InitialRate = 500
@@ -448,14 +448,14 @@ func TestNewAdaptiveThrottler(t *testing.T) {
 	if at2.config.InitialRate != 500 {
 		t.Errorf("Expected InitialRate 500, got %d", at2.config.InitialRate)
 	}
-	at2.close()
+	at2.Close()
 
 	invalidConfig := &AdaptiveThrottlerConfig{
 		SampleInterval: 1 * time.Millisecond,
 	}
 	at3, err := NewAdaptiveThrottler(invalidConfig)
 	if err == nil {
-		at3.close()
+		at3.Close()
 		t.Fatal("Expected error with invalid config")
 	}
 }
@@ -620,7 +620,7 @@ func TestAdaptiveThrottler_FlowControl(t *testing.T) {
 
 	// Wait a bit more for processing
 	time.Sleep(100 * time.Millisecond)
-	at.close()
+	at.Close()
 
 	// Wait for receiving to complete
 	<-receiveDone
@@ -640,7 +640,7 @@ func TestAdaptiveThrottler_FlowControl(t *testing.T) {
 // TestAdaptiveThrottler_To tests To method that streams data to a sink
 func TestAdaptiveThrottler_To(t *testing.T) {
 	at := createThrottlerWithLongInterval(t)
-	defer at.close()
+	defer at.Close()
 
 	var received []any
 	var mu sync.Mutex
@@ -737,7 +737,7 @@ func TestAdaptiveThrottler_StreamPortioned(t *testing.T) {
 func TestAdaptiveThrottler_Via_DataFlow(t *testing.T) {
 	// Actually test data flow
 	at, _ := NewAdaptiveThrottler(DefaultAdaptiveThrottlerConfig())
-	defer at.close()
+	defer at.Close()
 
 	// Send test data and verify it flows through
 	testData := []any{"test1", "test2"}
@@ -991,22 +991,17 @@ func TestAdaptiveThrottler_To_Shutdown(t *testing.T) {
 	// Wait a bit for data to start flowing
 	time.Sleep(100 * time.Millisecond)
 
-	// Close the throttler
-	at.close()
+	at.Close()
 
 	// Wait for To to complete (it will finish when streamPortioned completes)
 	select {
 	case <-toDone:
-		// Good, To completed
 	case <-time.After(2 * time.Second):
 		t.Error("To method did not complete within timeout")
 	}
 
-	// Verify sink channel is closed (streamPortioned closes inlet.In())
-	// Give it a moment to ensure the close has propagated
 	time.Sleep(100 * time.Millisecond)
 
-	// Verify sink channel is closed
 	verifyChannelClosed(t, sinkCh, 50*time.Millisecond)
 }
 

@@ -251,7 +251,7 @@ func (at *AdaptiveThrottler) streamPortioned(inlet streams.Inlet) {
 	}
 }
 
-func (at *AdaptiveThrottler) close() {
+func (at *AdaptiveThrottler) Close() {
 	if at.closed.CompareAndSwap(false, true) {
 		close(at.done)
 		at.monitor.Close()
