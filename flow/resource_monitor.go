@@ -72,8 +72,9 @@ func newResourceMonitor(
 		Timestamp: time.Now(),
 	})
 
-	rm.initSampler()
+	rm.initSampler(cpuMode)
 	rm.initMemoryReader()
+	rm.setMemoryReader(memoryReader)
 
 	go rm.monitor()
 	return rm
@@ -124,12 +125,27 @@ func (rm *ResourceMonitor) SetMode(newMode CPUUsageMode) {
 
 // initSampler initializes the appropriate CPU usage sampler.
 // Uses measured mode by default if available
-func (rm *ResourceMonitor) initSampler() {
-	if sampler, err := sysmonitor.NewCPUSampler(sysmonitor.OSFileSystem{}); err == nil {
-		rm.sampler = sampler
-		rm.cpuMode = CPUUsageModeMeasured
-	} else {
-		// Fallback to heuristic
+func (rm *ResourceMonitor) initSampler(mode CPUUsageMode) {
+	switch mode {
+	case CPUUsageModeHeuristic:
+		rm.sampler = sysmonitor.NewGoroutineHeuristicSampler()
+		rm.cpuMode = CPUUsageModeHeuristic
+	case CPUUsageModeMeasured:
+		if sampler, err := sysmonitor.NewCPUSampler(sysmonitor.OSFileSystem{}); err == nil {
+			rm.sampler = sampler
+			rm.cpuMode = CPUUsageModeMeasured
+			return
+		}
+		// fall back if measured unavailable
+		rm.sampler = sysmonitor.NewGoroutineHeuristicSampler()
+		rm.cpuMode = CPUUsageModeHeuristic
+	default:
+		// Unknown mode: best-effort measured with fallback
+		if sampler, err := sysmonitor.NewCPUSampler(sysmonitor.OSFileSystem{}); err == nil {
+			rm.sampler = sampler
+			rm.cpuMode = CPUUsageModeMeasured
+			return
+		}
 		rm.sampler = sysmonitor.NewGoroutineHeuristicSampler()
 		rm.cpuMode = CPUUsageModeHeuristic
 	}
@@ -139,6 +155,16 @@ func (rm *ResourceMonitor) initSampler() {
 // This reader is reused across all sampling operations.
 func (rm *ResourceMonitor) initMemoryReader() {
 	rm.memoryReaderInstance = sysmonitor.NewProcessMemoryReader(sysmonitor.OSFileSystem{})
+}
+
+// setMemoryReader safely updates the custom memory reader if provided.
+func (rm *ResourceMonitor) setMemoryReader(reader func() (float64, error)) {
+	if reader == nil {
+		return
+	}
+	rm.mu.Lock()
+	rm.memoryReader = reader
+	rm.mu.Unlock()
 }
 
 // monitor runs the continuous resource sampling loop.
@@ -279,6 +305,11 @@ func (r *monitorRegistry) Acquire(
 		// Check if we need to upgrade the existing instance
 		if cpuMode > r.instance.GetMode() {
 			r.instance.SetMode(cpuMode)
+		}
+
+		// Apply custom memory reader if provided
+		if memReader != nil {
+			r.instance.setMemoryReader(memReader)
 		}
 
 		// Adjust interval if this new user needs it faster

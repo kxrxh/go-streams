@@ -281,43 +281,45 @@ func (at *AdaptiveThrottler) pipelineLoop() {
 	// The earliest allowed time for the next item to be emitted
 	nextEmission := time.Now()
 
-	for item := range at.in {
-		// Check if the throttler is done
+	for {
 		select {
 		case <-at.done:
 			return
-		default:
-		}
+		case item, ok := <-at.in:
+			if !ok {
+				return
+			}
 
-		// Get the current interval
-		rate := at.GetCurrentRate()
-		if rate < 1.0 {
-			rate = 1.0
-		}
+			// Get the current interval
+			rate := at.GetCurrentRate()
+			if rate < 1.0 {
+				rate = 1.0
+			}
 
-		// Calculate the interval between emissions for the current rate
-		interval := time.Duration(float64(time.Second) / rate)
+			// Calculate the interval between emissions for the current rate
+			interval := time.Duration(float64(time.Second) / rate)
 
-		now := time.Now()
+			now := time.Now()
 
-		// If we are ahead of schedule, sleep until the next emission
-		if now.Before(nextEmission) {
-			sleepDuration := nextEmission.Sub(now)
+			// If we are ahead of schedule, sleep until the next emission
+			if now.Before(nextEmission) {
+				sleepDuration := nextEmission.Sub(now)
+				select {
+				case <-time.After(sleepDuration):
+					now = time.Now()
+				case <-at.done:
+					return
+				}
+			}
+
+			nextEmission = now.Add(interval)
+
+			// Emit
 			select {
-			case <-time.After(sleepDuration):
-				now = time.Now()
+			case at.out <- item:
 			case <-at.done:
 				return
 			}
-		}
-
-		nextEmission = now.Add(interval)
-
-		// Emit
-		select {
-		case at.out <- item:
-		case <-at.done:
-			return
 		}
 	}
 }

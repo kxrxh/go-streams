@@ -117,7 +117,7 @@ func setupDemoThrottler(elementsProcessed *atomic.Int64) *flow.AdaptiveThrottler
 func produceBurst(in chan<- any, total int) {
 	defer close(in)
 
-	for i := range total {
+	for i := 0; i < total; i++ {
 		in <- fmt.Sprintf("job-%02d", i)
 
 		if (i+1)%10 == 0 {
