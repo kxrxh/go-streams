@@ -139,36 +139,6 @@ func createThrottlerForRateTesting(
 	return throttler, mockMonitor
 }
 
-// calculateNewRate calculates the new rate based on current rate and resource stats.
-// This implements the core adaptive throttling algorithm.
-func calculateNewRate(config *AdaptiveThrottlerConfig, currentRate float64, stats ResourceStats) float64 {
-	isConstrained := stats.MemoryUsedPercent > config.MaxMemoryPercent ||
-		stats.CPUUsagePercent > config.MaxCPUPercent
-
-	isBelowRecovery := stats.MemoryUsedPercent < config.RecoveryMemoryThreshold &&
-		stats.CPUUsagePercent < config.RecoveryCPUThreshold
-
-	shouldIncrease := !isConstrained && (!config.EnableHysteresis || isBelowRecovery)
-
-	targetRate := currentRate
-	if isConstrained {
-		targetRate *= config.BackoffFactor
-	} else if shouldIncrease {
-		targetRate *= config.RecoveryFactor
-		if targetRate > float64(config.MaxRate) {
-			targetRate = float64(config.MaxRate)
-		}
-	}
-
-	newRate := currentRate + (targetRate-currentRate)*smoothingFactor
-
-	if newRate < float64(config.MinRate) {
-		newRate = float64(config.MinRate)
-	}
-
-	return newRate
-}
-
 // simulateRateAdjustments simulates a sequence of rate adjustments and returns the final rate.
 // This is used to calculate expected rate ranges algorithmically instead of hardcoding them.
 func simulateRateAdjustments(

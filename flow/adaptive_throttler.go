@@ -324,31 +324,35 @@ func (at *AdaptiveThrottler) pipelineLoop() {
 	}
 }
 
-// adjustRate calculates the new rate based on stats and updates it atomically.
-func (at *AdaptiveThrottler) adjustRate() {
-	stats := at.monitor.GetStats()
-	currentRate := at.GetCurrentRate()
+// calculateNewRate computes the next rate based on current config, rate, and stats.
+func calculateNewRate(config *AdaptiveThrottlerConfig, currentRate float64, stats ResourceStats) float64 {
+	// If stats are clearly missing (zero values with no timestamp), avoid adjusting.
+	if stats.Timestamp.IsZero() && stats.CPUUsagePercent == 0 && stats.MemoryUsedPercent == 0 {
+		return currentRate
+	}
+
+	cpuLimitEnabled := config.MaxCPUPercent > 0
 
 	// Check if the resource usage is above the threshold
-	isConstrained := stats.MemoryUsedPercent > at.config.MaxMemoryPercent ||
-		stats.CPUUsagePercent > at.config.MaxCPUPercent
+	isCPUConstrained := cpuLimitEnabled && stats.CPUUsagePercent > config.MaxCPUPercent
+	isConstrained := stats.MemoryUsedPercent > config.MaxMemoryPercent || isCPUConstrained
 
 	// Check if the resource usage is below the recovery threshold
-	isBelowRecovery := stats.MemoryUsedPercent < at.config.RecoveryMemoryThreshold &&
-		stats.CPUUsagePercent < at.config.RecoveryCPUThreshold
+	cpuBelowRecovery := !cpuLimitEnabled || stats.CPUUsagePercent < config.RecoveryCPUThreshold
+	isBelowRecovery := stats.MemoryUsedPercent < config.RecoveryMemoryThreshold && cpuBelowRecovery
 
 	// Check if the resource usage is below the recovery threshold and hysteresis is disabled
-	shouldIncrease := !isConstrained && (!at.config.EnableHysteresis || isBelowRecovery)
+	shouldIncrease := !isConstrained && (!config.EnableHysteresis || isBelowRecovery)
 
 	targetRate := currentRate
 	if isConstrained {
 		// Reduce the rate by the backoff factor
-		targetRate *= at.config.BackoffFactor
+		targetRate *= config.BackoffFactor
 	} else if shouldIncrease {
 		// Increase the rate by the recovery factor
-		targetRate *= at.config.RecoveryFactor
-		if targetRate > float64(at.config.MaxRate) {
-			targetRate = float64(at.config.MaxRate)
+		targetRate *= config.RecoveryFactor
+		if targetRate > float64(config.MaxRate) {
+			targetRate = float64(config.MaxRate)
 		}
 	}
 
@@ -356,9 +360,18 @@ func (at *AdaptiveThrottler) adjustRate() {
 	newRate := currentRate + (targetRate-currentRate)*smoothingFactor
 
 	// Enforce minimum rate
-	if newRate < float64(at.config.MinRate) {
-		newRate = float64(at.config.MinRate)
+	if newRate < float64(config.MinRate) {
+		newRate = float64(config.MinRate)
 	}
 
+	return newRate
+}
+
+// adjustRate calculates the new rate based on stats and updates it atomically.
+func (at *AdaptiveThrottler) adjustRate() {
+	stats := at.monitor.GetStats()
+	currentRate := at.GetCurrentRate()
+
+	newRate := calculateNewRate(&at.config, currentRate, stats)
 	at.setRate(newRate)
 }

@@ -2,6 +2,7 @@ package flow
 
 import (
 	"testing"
+	"time"
 
 	"github.com/reugn/go-streams/internal/assert"
 )
@@ -78,10 +79,10 @@ func TestAdaptiveThrottler_Hysteresis(t *testing.T) {
 
 	// Test with hysteresis disabled
 	config.EnableHysteresis = false
-	at2, _ := createThrottlerForRateTesting(config, 50.0)
+	at2, mockMonitor2 := createThrottlerForRateTesting(config, 50.0)
 
 	// CPU at 75% (below max threshold) - should increase immediately
-	mockMonitor.ExpectGetStats(ResourceStats{
+	mockMonitor2.ExpectGetStats(ResourceStats{
 		CPUUsagePercent:   75.0,
 		MemoryUsedPercent: 40.0,
 	})
@@ -101,7 +102,11 @@ func TestAdaptiveThrottler_Limits(t *testing.T) {
 
 	at, mockMonitor := createThrottlerForRateTesting(config, 10.0)
 
-	mockMonitor.ExpectGetStats(ResourceStats{CPUUsagePercent: 0, MemoryUsedPercent: 0})
+	mockMonitor.ExpectGetStats(ResourceStats{
+		CPUUsagePercent:   0,
+		MemoryUsedPercent: 0,
+		Timestamp:         time.Now(),
+	})
 	at.adjustRate()
 	assert.InDelta(t, 13.0, at.GetCurrentRate(), 0.01)
 }
@@ -176,5 +181,58 @@ func TestAdaptiveThrottler_AdjustRate_EdgeCases(t *testing.T) {
 	rate = at.GetCurrentRate()
 	if rate > 50.0 {
 		t.Errorf("With hysteresis, rate should not increase at threshold, got %f", rate)
+	}
+}
+
+// TestAdaptiveThrottler_DisableCPUThrottling ensures MaxCPUPercent=0 disables CPU-based constraints.
+func TestAdaptiveThrottler_DisableCPUThrottling(t *testing.T) {
+	config := DefaultAdaptiveThrottlerConfig()
+	config.MinRate = 10
+	config.MaxRate = 100
+	config.InitialRate = 50
+	config.BackoffFactor = 0.7
+	config.RecoveryFactor = 1.3
+	config.MaxCPUPercent = 0
+	config.RecoveryCPUThreshold = 0
+	config.MaxMemoryPercent = 85.0
+	config.RecoveryMemoryThreshold = 65.0
+
+	at, mockMonitor := createThrottlerForRateTesting(config, float64(config.InitialRate))
+
+	// High CPU alone should not constrain when CPU limit disabled; expect increase.
+	mockMonitor.ExpectGetStats(ResourceStats{
+		CPUUsagePercent:   95.0,
+		MemoryUsedPercent: 40.0,
+	})
+	at.adjustRate()
+	assert.InDelta(t, 54.5, at.GetCurrentRate(), 0.01)
+
+	// Memory pressure should still constrain even if CPU is high.
+	rateBefore := at.GetCurrentRate()
+	mockMonitor.ExpectGetStats(ResourceStats{
+		CPUUsagePercent:   95.0,
+		MemoryUsedPercent: 90.0,
+	})
+	at.adjustRate()
+	rateAfter := at.GetCurrentRate()
+	if rateAfter >= rateBefore {
+		t.Errorf("Rate should decrease under memory pressure, got before %.2f after %.2f", rateBefore, rateAfter)
+	}
+}
+
+// TestAdaptiveThrottler_AdjustRate_IgnoresMissingStats ensures missing stats do not cause runaway increases.
+func TestAdaptiveThrottler_AdjustRate_IgnoresMissingStats(t *testing.T) {
+	config := DefaultAdaptiveThrottlerConfig()
+	config.InitialRate = 50
+	config.MinRate = 10
+	config.MaxRate = 100
+
+	at, mockMonitor := createThrottlerForRateTesting(config, float64(config.InitialRate))
+
+	mockMonitor.ExpectGetStats(ResourceStats{}) // Simulate missing/invalid stats
+	at.adjustRate()
+
+	if got := at.GetCurrentRate(); got != float64(config.InitialRate) {
+		t.Errorf("Rate unchanged when stats missing: want %.2f got %.2f", float64(config.InitialRate), got)
 	}
 }
