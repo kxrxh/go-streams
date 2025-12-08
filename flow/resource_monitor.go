@@ -49,7 +49,7 @@ type ResourceMonitor struct {
 	memoryReaderInstance sysmonitor.ProcessMemoryReader // System memory reader instance.
 	updateIntervalCh     chan time.Duration             // Channel for dynamic interval updates.
 	done                 chan struct{}                  // Signals monitoring loop termination.
-	stopped              chan struct{}                  // Closed when monitor loop exits.
+	wg                   sync.WaitGroup                 // Waits for monitor loop to exit.
 	closeOnce            sync.Once                      // Ensures clean shutdown.
 }
 
@@ -66,7 +66,6 @@ func newResourceMonitor(
 		memoryReader:     memoryReader,
 		updateIntervalCh: make(chan time.Duration, 1),
 		done:             make(chan struct{}),
-		stopped:          make(chan struct{}),
 	}
 
 	// Initialize with empty stats
@@ -78,6 +77,7 @@ func newResourceMonitor(
 	rm.initMemoryReader()
 	rm.setMemoryReader(memoryReader)
 
+	rm.wg.Add(1)
 	go rm.monitor()
 	return rm
 }
@@ -174,7 +174,7 @@ func (rm *ResourceMonitor) setMemoryReader(reader func() (float64, error)) {
 func (rm *ResourceMonitor) monitor() {
 	ticker := time.NewTicker(rm.sampleInterval)
 	defer ticker.Stop()
-	defer close(rm.stopped)
+	defer rm.wg.Done()
 
 	for {
 		select {
@@ -250,7 +250,7 @@ func (rm *ResourceMonitor) stop() {
 	rm.closeOnce.Do(func() {
 		close(rm.done)
 	})
-	<-rm.stopped
+	rm.wg.Wait()
 }
 
 // globalMonitorRegistry manages the singleton ResourceMonitor instance.
