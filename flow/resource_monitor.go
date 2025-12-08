@@ -49,6 +49,7 @@ type ResourceMonitor struct {
 	memoryReaderInstance sysmonitor.ProcessMemoryReader // System memory reader instance.
 	updateIntervalCh     chan time.Duration             // Channel for dynamic interval updates.
 	done                 chan struct{}                  // Signals monitoring loop termination.
+	stopped              chan struct{}                  // Closed when monitor loop exits.
 	closeOnce            sync.Once                      // Ensures clean shutdown.
 }
 
@@ -65,6 +66,7 @@ func newResourceMonitor(
 		memoryReader:     memoryReader,
 		updateIntervalCh: make(chan time.Duration, 1),
 		done:             make(chan struct{}),
+		stopped:          make(chan struct{}),
 	}
 
 	// Initialize with empty stats
@@ -172,6 +174,7 @@ func (rm *ResourceMonitor) setMemoryReader(reader func() (float64, error)) {
 func (rm *ResourceMonitor) monitor() {
 	ticker := time.NewTicker(rm.sampleInterval)
 	defer ticker.Stop()
+	defer close(rm.stopped)
 
 	for {
 		select {
@@ -247,6 +250,7 @@ func (rm *ResourceMonitor) stop() {
 	rm.closeOnce.Do(func() {
 		close(rm.done)
 	})
+	<-rm.stopped
 }
 
 // globalMonitorRegistry manages the singleton ResourceMonitor instance.
