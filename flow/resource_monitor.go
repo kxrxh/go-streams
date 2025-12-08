@@ -290,9 +290,7 @@ func (r *monitorRegistry) Acquire(
 
 	// Cancel pending stop if we are resurrecting within the grace period
 	if r.stopTimer != nil {
-		if !r.stopTimer.Stop() {
-			<-r.stopTimer.C
-		}
+		_ = r.stopTimer.Stop()
 		r.stopTimer = nil
 	}
 
