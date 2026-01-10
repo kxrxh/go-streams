@@ -143,8 +143,5 @@ func main() {
 
 	sink.AwaitCompletion()
 
-	throttler1.Close()
-	throttler2.Close()
-
 	fmt.Printf("Demo completed! Processed %d messages\n", messagesProcessed.Load())
 }

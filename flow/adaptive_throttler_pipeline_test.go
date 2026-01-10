@@ -106,7 +106,7 @@ func TestAdaptiveThrottler_FlowControl(t *testing.T) {
 
 	// Wait a bit more for processing
 	time.Sleep(100 * time.Millisecond)
-	at.Close()
+	at.close()
 
 	// Wait for receiving to complete
 	<-receiveDone
@@ -126,7 +126,7 @@ func TestAdaptiveThrottler_FlowControl(t *testing.T) {
 // TestAdaptiveThrottler_To tests To method that streams data to a sink.
 func TestAdaptiveThrottler_To(t *testing.T) {
 	at := createThrottlerWithLongInterval(t)
-	defer at.Close()
+	defer at.close()
 
 	var received []any
 	var mu sync.Mutex
@@ -226,7 +226,7 @@ func TestAdaptiveThrottler_Via_DataFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create throttler: %v", err)
 	}
-	defer at.Close()
+	defer at.close()
 
 	downstream := NewPassThrough()
 
@@ -432,7 +432,7 @@ func TestAdaptiveThrottler_To_Shutdown(t *testing.T) {
 	// Wait a bit for data to start flowing
 	time.Sleep(100 * time.Millisecond)
 
-	at.Close()
+	at.close()
 
 	// Wait for To to complete (it will finish when streamPortioned completes)
 	select {

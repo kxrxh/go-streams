@@ -251,9 +251,21 @@ func (at *AdaptiveThrottler) streamPortioned(inlet streams.Inlet) {
 	}
 }
 
-func (at *AdaptiveThrottler) Close() {
+// close stops the adaptive throttler and releases resources.
+// Closes the input channel to unblock pipelineLoop, signals done to stop monitorLoop,
+// and closes the resource monitor.
+// It is primarily intended for testing.
+func (at *AdaptiveThrottler) close() {
 	if at.closed.CompareAndSwap(false, true) {
-		close(at.done)
+		// Safely close channels (may already be closed in tests)
+		func() {
+			defer func() { _ = recover() }()
+			close(at.in) // Close input channel to unblock pipelineLoop
+		}()
+		func() {
+			defer func() { _ = recover() }()
+			close(at.done)
+		}()
 		at.monitor.Close()
 	}
 }

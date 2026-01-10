@@ -293,7 +293,7 @@ func TestNewAdaptiveThrottler(t *testing.T) {
 	if at1.config.InitialRate != 1000 {
 		t.Errorf("Expected default InitialRate 1000, got %d", at1.config.InitialRate)
 	}
-	at1.Close()
+	at1.close()
 
 	config := DefaultAdaptiveThrottlerConfig()
 	config.InitialRate = 500
@@ -304,14 +304,14 @@ func TestNewAdaptiveThrottler(t *testing.T) {
 	if at2.config.InitialRate != 500 {
 		t.Errorf("Expected InitialRate 500, got %d", at2.config.InitialRate)
 	}
-	at2.Close()
+	at2.close()
 
 	invalidConfig := &AdaptiveThrottlerConfig{
 		SampleInterval: 1 * time.Millisecond,
 	}
 	at3, err := NewAdaptiveThrottler(invalidConfig)
 	if err == nil {
-		at3.Close()
+		at3.close()
 		t.Fatal("Expected error with invalid config")
 	}
 }

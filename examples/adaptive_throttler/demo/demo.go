@@ -66,8 +66,6 @@ func main() {
 		fmt.Printf("❌ FAILURE: %d elements were dropped!\n", 250-elementsReceived)
 	}
 
-	throttler.Close()
-
 	fmt.Println("adaptive throttling pipeline completed")
 }
 
