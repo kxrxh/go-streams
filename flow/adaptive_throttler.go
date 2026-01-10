@@ -172,7 +172,7 @@ func NewAdaptiveThrottler(config *AdaptiveThrottlerConfig) (*AdaptiveThrottler, 
 		config = DefaultAdaptiveThrottlerConfig()
 	}
 	if err := config.validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invalid adaptive throttler config: %w", err)
 	}
 
 	monitor := globalMonitorRegistry.Acquire(
