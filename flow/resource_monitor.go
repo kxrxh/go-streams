@@ -207,9 +207,16 @@ func (rm *ResourceMonitor) sample() {
 	switch {
 	// Check if a custom memory reader is provided
 	case rm.memoryReader != nil:
-		if mem, err := rm.memoryReader(); err == nil {
-			stats.MemoryUsedPercent = mem
-		}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("panic in custom memory reader", "panic", r)
+				}
+			}()
+			if mem, err := rm.memoryReader(); err == nil {
+				stats.MemoryUsedPercent = mem
+			}
+		}()
 	case rm.memoryReaderInstance != nil:
 		if memStats, err := rm.memoryReaderInstance.Sample(); err == nil && memStats.Total > 0 {
 			used := memStats.Total - memStats.Available
