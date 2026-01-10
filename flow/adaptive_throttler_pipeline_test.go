@@ -5,7 +5,46 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/reugn/go-streams/internal/testutil"
 )
+
+// MockMonitor is a mock implementation of resourceMonitor for testing.
+type MockMonitor struct {
+	getStatsReturns []ResourceStats
+	getStatsIndex   int
+	closeCalled     bool
+}
+
+func (m *MockMonitor) GetStats() ResourceStats {
+	if m.getStatsIndex < len(m.getStatsReturns) {
+		result := m.getStatsReturns[m.getStatsIndex]
+		m.getStatsIndex++
+		return result
+	}
+	return ResourceStats{}
+}
+
+func (m *MockMonitor) Close() {
+	m.closeCalled = true
+}
+
+func (m *MockMonitor) ExpectGetStats(stats ...ResourceStats) {
+	m.getStatsReturns = stats
+	m.getStatsIndex = 0
+}
+
+// createThrottlerWithLongInterval creates a throttler with default config but long sample interval.
+func createThrottlerWithLongInterval(t *testing.T) *AdaptiveThrottler {
+	t.Helper()
+	config := DefaultAdaptiveThrottlerConfig()
+	config.SampleInterval = 10 * time.Second
+	at, err := NewAdaptiveThrottler(config)
+	if err != nil {
+		t.Fatalf("Failed to create throttler: %v", err)
+	}
+	return at
+}
 
 // TestAdaptiveThrottler_FlowControl tests token bucket throttling with burst traffic.
 func TestAdaptiveThrottler_FlowControl(t *testing.T) {
@@ -94,13 +133,10 @@ func TestAdaptiveThrottler_To(t *testing.T) {
 	done := make(chan struct{})
 
 	sinkCh := make(chan any, 10)
-	mockSink := &mockSink{
-		in:         sinkCh,
-		completion: make(chan struct{}),
-	}
+	mockSink := testutil.NewMockSink(sinkCh, make(chan struct{}))
 
 	// Collect data from sink
-	go collectDataFromChannelWithMutex(sinkCh, &received, &mu, done)
+	go testutil.CollectDataFromChannelWithMutex(sinkCh, &received, &mu, done)
 
 	testData := []any{"test1", "test2", "test3"}
 
@@ -145,7 +181,7 @@ func TestAdaptiveThrottler_StreamPortioned(t *testing.T) {
 	}
 
 	inletIn := make(chan any, 10)
-	mockInlet := &mockInlet{in: inletIn}
+	mockInlet := testutil.NewMockInlet(inletIn)
 
 	testData := []any{"data1", "data2", "data3"}
 	var received []any
@@ -156,7 +192,7 @@ func TestAdaptiveThrottler_StreamPortioned(t *testing.T) {
 	go at.streamPortioned(mockInlet)
 
 	// Collect all received data
-	go collectDataFromChannelWithMutex(inletIn, &received, &mu, done)
+	go testutil.CollectDataFromChannelWithMutex(inletIn, &received, &mu, done)
 
 	// Send test data
 	go func() {
@@ -207,7 +243,7 @@ func TestAdaptiveThrottler_Via_DataFlow(t *testing.T) {
 		close(at.In())
 	}()
 
-	received := collectDataFromChannel(resultFlow.Out())
+	received := testutil.CollectDataFromChannel(resultFlow.Out())
 
 	if len(received) != len(testData) {
 		t.Fatalf("Expected %d items, got %d", len(testData), len(received))
@@ -375,8 +411,8 @@ func TestAdaptiveThrottler_PipelineLoop_LowRate(t *testing.T) {
 func TestAdaptiveThrottler_To_Shutdown(t *testing.T) {
 	at := createThrottlerWithLongInterval(t)
 
-	mockSink := newMockSinkWithChannelDrain()
-	sinkCh := mockSink.in
+	mockSink := testutil.NewMockSinkWithChannelDrain()
+	sinkCh := mockSink.GetChannel()
 
 	// Start To in background
 	toDone := make(chan struct{})
@@ -407,7 +443,7 @@ func TestAdaptiveThrottler_To_Shutdown(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	verifyChannelClosed(t, sinkCh, 50*time.Millisecond)
+	testutil.VerifyChannelClosed(t, sinkCh, 50*time.Millisecond)
 }
 
 // TestAdaptiveThrottler_StreamPortioned_Blocking tests streamPortioned with blocking inlet.
@@ -424,7 +460,7 @@ func TestAdaptiveThrottler_StreamPortioned_Blocking(t *testing.T) {
 
 	// Unbuffered inlet to test blocking behavior
 	inletIn := make(chan any)
-	mockInlet := &mockInlet{in: inletIn}
+	mockInlet := testutil.NewMockInlet(inletIn)
 
 	// Start streamPortioned in background
 	done := make(chan struct{})
@@ -441,7 +477,7 @@ func TestAdaptiveThrottler_StreamPortioned_Blocking(t *testing.T) {
 	}()
 
 	// Read from inlet (unblocking the sender)
-	received := collectDataFromChannel(inletIn)
+	received := testutil.CollectDataFromChannel(inletIn)
 
 	// Wait for completion
 	select {
@@ -452,7 +488,7 @@ func TestAdaptiveThrottler_StreamPortioned_Blocking(t *testing.T) {
 	}
 
 	// Verify inlet is closed
-	verifyChannelClosed(t, inletIn, 50*time.Millisecond)
+	testutil.VerifyChannelClosed(t, inletIn, 50*time.Millisecond)
 
 	if len(received) != 2 {
 		t.Errorf("Expected 2 items, got %d", len(received))

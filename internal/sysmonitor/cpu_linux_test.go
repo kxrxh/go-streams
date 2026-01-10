@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/reugn/go-streams/internal/testutil"
 )
 
 // generateAuxv creates a binary payload mimicking /proc/self/auxv
@@ -25,7 +27,7 @@ func generateAuxv(ticks uint64) []byte {
 
 func TestLinuxProcessSampler(t *testing.T) {
 	// Setup Mock FS
-	mockFS := &MockFileSystem{
+	mockFS := &testutil.MockFileSystem{
 		Files: map[string][]byte{
 			"/proc/self/auxv": generateAuxv(100), // 100 ticks per second
 		},
@@ -93,7 +95,7 @@ func TestLinuxProcessSampler(t *testing.T) {
 }
 
 func TestGetClockTicksFallback(t *testing.T) {
-	mockFS := &MockFileSystem{Files: map[string][]byte{}} // Empty FS
+	mockFS := &testutil.MockFileSystem{Files: map[string][]byte{}} // Empty FS
 
 	ticks, err := getClockTicks(mockFS)
 	if err != nil {
@@ -181,7 +183,7 @@ func TestParseAuxv32(t *testing.T) {
 }
 
 func TestGetClockTicks32Bit(t *testing.T) {
-	mockFS := &MockFileSystem{
+	mockFS := &testutil.MockFileSystem{
 		Files: map[string][]byte{
 			"/proc/self/auxv": generateAuxv32(250), // 32-bit format (8 bytes per entry)
 		},
@@ -198,7 +200,7 @@ func TestGetClockTicks32Bit(t *testing.T) {
 
 func TestNewPlatformCPUSamplerErrors(t *testing.T) {
 	// Test clock ticks read failure (should still succeed with fallback)
-	mockFS := &MockFileSystem{
+	mockFS := &testutil.MockFileSystem{
 		OpenErrs: map[string]error{
 			"/proc/self/auxv": fmt.Errorf("permission denied"),
 		},

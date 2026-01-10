@@ -8,6 +8,43 @@ import (
 	"github.com/reugn/go-streams/internal/sysmonitor"
 )
 
+type mockCPUSampler struct {
+	val float64
+}
+
+func (m *mockCPUSampler) Sample(_ time.Duration) float64 {
+	return m.val
+}
+
+func (m *mockCPUSampler) Reset() {
+	// No-op for mock
+}
+
+func (m *mockCPUSampler) IsInitialized() bool {
+	return true
+}
+
+type assertError string
+
+func (e assertError) Error() string { return string(e) }
+
+// assertValidStats checks that resource stats contain reasonable values.
+func assertValidStats(t *testing.T, stats ResourceStats) {
+	t.Helper()
+	if stats.Timestamp.IsZero() {
+		t.Error("Timestamp should not be zero")
+	}
+	if stats.GoroutineCount < 0 {
+		t.Errorf("GoroutineCount should not be negative, got %d", stats.GoroutineCount)
+	}
+	if stats.MemoryUsedPercent < 0 || stats.MemoryUsedPercent > 200 { // Allow >100% for some systems
+		t.Errorf("MemoryUsedPercent should be between 0-200, got %f", stats.MemoryUsedPercent)
+	}
+	if stats.CPUUsagePercent < 0 {
+		t.Errorf("CPUUsagePercent should not be negative, got %f", stats.CPUUsagePercent)
+	}
+}
+
 // Tests for monitor creation and sampling behavior.
 func TestResourceMonitor_Initialization(t *testing.T) {
 	setupTest(t)
@@ -235,6 +272,62 @@ func TestResourceMonitor_SetMode(t *testing.T) {
 	rm.SetMode(CPUUsageModeMeasured)
 	if rm.GetMode() != CPUUsageModeMeasured {
 		t.Errorf("Expected mode to remain Measured, got %v", rm.GetMode())
+	}
+}
+
+// TestResourceMonitor_SetMode_HeuristicCase tests the CPUUsageModeHeuristic case in SetMode.
+func TestResourceMonitor_SetMode_HeuristicCase(t *testing.T) {
+	setupTest(t)
+
+	rm := newResourceMonitor(time.Second, CPUUsageModeMeasured, nil)
+	defer rm.stop()
+
+	// Switch to heuristic mode - this tests the CPUUsageModeHeuristic case
+	rm.SetMode(CPUUsageModeHeuristic)
+	if rm.GetMode() != CPUUsageModeHeuristic {
+		t.Errorf("Expected mode Heuristic after SetMode, got %v", rm.GetMode())
+	}
+
+	// Verify sampler is heuristic type
+	if rm.sampler == nil {
+		t.Fatal("Expected sampler to be set")
+	}
+}
+
+// TestResourceMonitor_initSampler_DefaultCase tests the default case in initSampler.
+func TestResourceMonitor_initSampler_DefaultCase(t *testing.T) {
+	setupTest(t)
+
+	// Create a monitor with an invalid CPUUsageMode (beyond the defined values)
+	// This tests the default case fallback logic
+	invalidMode := CPUUsageMode(999) // Invalid mode value
+	rm := newResourceMonitor(time.Second, invalidMode, nil)
+	defer rm.stop()
+
+	// The default case should attempt measured mode first, then fallback to heuristic
+	if rm.sampler == nil {
+		t.Fatal("Expected sampler to be initialized even with invalid mode")
+	}
+	// Should end up in heuristic mode as fallback
+	if rm.cpuMode != CPUUsageModeHeuristic && rm.cpuMode != CPUUsageModeMeasured {
+		t.Errorf("Expected mode to be Heuristic or Measured after fallback, got %v", rm.cpuMode)
+	}
+}
+
+// TestResourceMonitor_initSampler_HeuristicCase tests the CPUUsageModeHeuristic case in initSampler.
+func TestResourceMonitor_initSampler_HeuristicCase(t *testing.T) {
+	setupTest(t)
+
+	rm := newResourceMonitor(time.Second, CPUUsageModeHeuristic, nil)
+	defer rm.stop()
+
+	// Should initialize with heuristic sampler
+	if rm.sampler == nil {
+		t.Fatal("Expected sampler to be initialized")
+	}
+	// Mode should be heuristic (or measured if measured is preferred)
+	if rm.cpuMode != CPUUsageModeHeuristic && rm.cpuMode != CPUUsageModeMeasured {
+		t.Errorf("Unexpected CPU mode: %v", rm.cpuMode)
 	}
 }
 

@@ -1,4 +1,4 @@
-package sysmonitor
+package testutil
 
 import (
 	"errors"
@@ -6,7 +6,8 @@ import (
 	"io/fs"
 )
 
-// MockFileSystem implements FileSystem for testing
+// MockFileSystem implements sysmonitor.FileSystem for testing.
+// It provides an in-memory file system for testing file operations.
 type MockFileSystem struct {
 	Files    map[string][]byte
 	OpenErrs map[string]error
@@ -29,7 +30,7 @@ func (m *MockFileSystem) Open(name string) (fs.File, error) {
 	return nil, errors.New("file not found")
 }
 
-// mockFile implements fs.File for testing
+// mockFile implements fs.File for testing.
 type mockFile struct {
 	content []byte
 	pos     int

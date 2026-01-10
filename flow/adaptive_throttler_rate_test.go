@@ -1,11 +1,26 @@
 package flow
 
 import (
+	"math"
 	"testing"
 	"time"
 
 	"github.com/reugn/go-streams/internal/assert"
 )
+
+// createThrottlerForRateTesting creates a throttler with mock monitor for rate adjustment testing.
+func createThrottlerForRateTesting(
+	config *AdaptiveThrottlerConfig,
+	initialRate float64,
+) (*AdaptiveThrottler, *MockMonitor) {
+	mockMonitor := &MockMonitor{}
+	throttler := &AdaptiveThrottler{
+		config:          *config,
+		monitor:         mockMonitor,
+		currentRateBits: math.Float64bits(initialRate),
+	}
+	return throttler, mockMonitor
+}
 
 // TestAdaptiveThrottler_AdjustRate_Logic tests rate adjustment algorithm with high/low resource usage.
 func TestAdaptiveThrottler_AdjustRate_Logic(t *testing.T) {

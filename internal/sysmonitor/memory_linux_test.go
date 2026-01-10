@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/reugn/go-streams/internal/testutil"
 )
 
 func TestLinuxMemoryReader_CgroupV2(t *testing.T) {
-	fs := &MockFileSystem{
+	fs := &testutil.MockFileSystem{
 		Files: map[string][]byte{
 			"/sys/fs/cgroup/memory.current": []byte("123456789"),
 			"/sys/fs/cgroup/memory.max":     []byte("987654321"),
@@ -36,7 +38,7 @@ func TestLinuxMemoryReader_CgroupV2(t *testing.T) {
 }
 
 func TestLinuxMemoryReader_CgroupV1(t *testing.T) {
-	fs := &MockFileSystem{
+	fs := &testutil.MockFileSystem{
 		Files: map[string][]byte{
 			"/sys/fs/cgroup/memory/memory.usage_in_bytes": []byte("222222222"),
 			"/sys/fs/cgroup/memory/memory.limit_in_bytes": []byte("888888888"),
@@ -59,7 +61,7 @@ func TestLinuxMemoryReader_CgroupV1(t *testing.T) {
 
 func TestLinuxMemoryReader_CgroupV1_Oversubscribed(t *testing.T) {
 	// Test case where usage > limit (oversubscribed memory)
-	fs := &MockFileSystem{
+	fs := &testutil.MockFileSystem{
 		Files: map[string][]byte{
 			"/sys/fs/cgroup/memory/memory.usage_in_bytes": []byte("900000000"), // Usage exceeds limit
 			"/sys/fs/cgroup/memory/memory.limit_in_bytes": []byte("800000000"),
@@ -86,7 +88,7 @@ func TestLinuxMemoryReader_CgroupV1_Oversubscribed(t *testing.T) {
 
 func TestLinuxMemoryReader_CgroupV1_AvailableCapped(t *testing.T) {
 	// Test case where calculated available exceeds limit and gets capped
-	fs := &MockFileSystem{
+	fs := &testutil.MockFileSystem{
 		Files: map[string][]byte{
 			"/sys/fs/cgroup/memory/memory.usage_in_bytes": []byte("100000000"), // Low usage
 			"/sys/fs/cgroup/memory/memory.limit_in_bytes": []byte("500000000"),
@@ -113,7 +115,7 @@ func TestLinuxMemoryReader_CgroupV1_AvailableCapped(t *testing.T) {
 }
 
 func TestLinuxMemoryReader_HostFallback(t *testing.T) {
-	fs := &MockFileSystem{
+	fs := &testutil.MockFileSystem{
 		Files: map[string][]byte{
 			"/proc/meminfo": []byte(`MemTotal:       16384000 kB
 MemFree:         8192000 kB
@@ -139,7 +141,7 @@ MemAvailable:    10000000 kB
 }
 
 func TestLinuxMemoryReader_MemInfoFallback(t *testing.T) {
-	fs := &MockFileSystem{
+	fs := &testutil.MockFileSystem{
 		Files: map[string][]byte{
 			"/proc/meminfo": []byte(`MemTotal:       16384000 kB
 MemFree:         8192000 kB
@@ -170,7 +172,7 @@ func TestLinuxMemoryReader_OverflowProtection(t *testing.T) {
 
 func TestCgroupDetection(t *testing.T) {
 	// Test that cgroup V1 detection works with our setup
-	fs := &MockFileSystem{
+	fs := &testutil.MockFileSystem{
 		Files: map[string][]byte{
 			"/sys/fs/cgroup/memory/memory.usage_in_bytes": []byte("1000000"),
 			"/sys/fs/cgroup/memory/memory.limit_in_bytes": []byte("18446744073709551615"),
@@ -194,7 +196,7 @@ func TestCgroupDetection(t *testing.T) {
 }
 
 func TestNewProcessMemoryReader(t *testing.T) {
-	reader := NewProcessMemoryReader(&MockFileSystem{})
+	reader := NewProcessMemoryReader(&testutil.MockFileSystem{})
 
 	// Should return a linuxMemoryReader (or platform-specific implementation)
 	if reader == nil {
@@ -205,12 +207,12 @@ func TestNewProcessMemoryReader(t *testing.T) {
 func TestLinuxMemoryReader_ErrorPaths(t *testing.T) {
 	tests := []struct {
 		name  string
-		setup func(*MockFileSystem)
+		setup func(*testutil.MockFileSystem)
 		err   string
 	}{
 		{
 			"MemTotal missing",
-			func(fs *MockFileSystem) {
+			func(fs *testutil.MockFileSystem) {
 				if fs.Files == nil {
 					fs.Files = make(map[string][]byte)
 				}
@@ -220,7 +222,7 @@ func TestLinuxMemoryReader_ErrorPaths(t *testing.T) {
 		},
 		{
 			"Meminfo parse fail",
-			func(fs *MockFileSystem) {
+			func(fs *testutil.MockFileSystem) {
 				if fs.OpenErrs == nil {
 					fs.OpenErrs = make(map[string]error)
 				}
@@ -230,7 +232,7 @@ func TestLinuxMemoryReader_ErrorPaths(t *testing.T) {
 		},
 		{
 			"Cgroup unlimited V1",
-			func(fs *MockFileSystem) {
+			func(fs *testutil.MockFileSystem) {
 				// Replace the Files map entirely to ensure clean setup
 				fs.Files = map[string][]byte{
 					"/sys/fs/cgroup/memory/memory.usage_in_bytes": []byte("1000000"),
@@ -250,7 +252,7 @@ func TestLinuxMemoryReader_ErrorPaths(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fs := &MockFileSystem{}
+			fs := &testutil.MockFileSystem{}
 			tt.setup(fs)
 
 			// Verify mock setup before creating reader
@@ -282,7 +284,7 @@ func runCgroupValueTest(
 	expectError bool,
 	errorContains string,
 ) {
-	fs := &MockFileSystem{}
+	fs := &testutil.MockFileSystem{}
 	if name != "File read error" {
 		fs.Files = map[string][]byte{
 			"/test/file": []byte(fileContent),
@@ -319,7 +321,7 @@ func runCgroupStatTest(
 	expectError bool,
 	errorContains string,
 ) {
-	fs := &MockFileSystem{}
+	fs := &testutil.MockFileSystem{}
 	if name != "File open error" {
 		fs.Files = map[string][]byte{
 			"/test/stat": []byte(fileContent),

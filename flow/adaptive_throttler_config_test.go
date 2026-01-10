@@ -160,6 +160,58 @@ func TestAdaptiveThrottlerConfig_Validate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "Invalid MinRate zero",
+			config: AdaptiveThrottlerConfig{
+				SampleInterval:   100 * time.Millisecond,
+				MaxMemoryPercent: 80,
+				MinRate:          0,
+				MaxRate:          100,
+				InitialRate:      50,
+				BackoffFactor:    0.5,
+				RecoveryFactor:   1.2,
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid MinRate negative",
+			config: AdaptiveThrottlerConfig{
+				SampleInterval:   100 * time.Millisecond,
+				MaxMemoryPercent: 80,
+				MinRate:          -5,
+				MaxRate:          100,
+				InitialRate:      50,
+				BackoffFactor:    0.5,
+				RecoveryFactor:   1.2,
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid MaxRate equals MinRate",
+			config: AdaptiveThrottlerConfig{
+				SampleInterval:   100 * time.Millisecond,
+				MaxMemoryPercent: 80,
+				MinRate:          10,
+				MaxRate:          10,
+				InitialRate:      10,
+				BackoffFactor:    0.5,
+				RecoveryFactor:   1.2,
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid MaxRate less than MinRate",
+			config: AdaptiveThrottlerConfig{
+				SampleInterval:   100 * time.Millisecond,
+				MaxMemoryPercent: 80,
+				MinRate:          100,
+				MaxRate:          50,
+				InitialRate:      75,
+				BackoffFactor:    0.5,
+				RecoveryFactor:   1.2,
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

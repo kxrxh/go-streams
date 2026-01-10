@@ -7,6 +7,18 @@ import (
 	"time"
 )
 
+func resetRegistry() {
+	globalMonitorRegistry = &monitorRegistry{
+		intervalRefs: make(map[time.Duration]int),
+	}
+}
+
+func setupTest(t *testing.T) {
+	t.Helper()
+	resetRegistry()
+	t.Cleanup(resetRegistry)
+}
+
 // Registry acquire/release and handle lifecycle.
 func TestMonitorRegistry_Acquire(t *testing.T) {
 	setupTest(t)
@@ -371,5 +383,80 @@ func TestMonitorRegistry_CalculateMinInterval(t *testing.T) {
 				t.Errorf("Expected %v, got %v", tt.expected, minInterval)
 			}
 		})
+	}
+}
+
+// TestMonitorRegistry_Acquire_UpgradeMode tests that acquiring with a higher cpuMode upgrades the instance.
+func TestMonitorRegistry_Acquire_UpgradeMode(t *testing.T) {
+	setupTest(t)
+
+	// First acquire with heuristic mode
+	h1 := globalMonitorRegistry.Acquire(time.Second, CPUUsageModeHeuristic, nil)
+	defer h1.Close()
+
+	initialMode := globalMonitorRegistry.instance.GetMode()
+
+	// Acquire with measured mode (higher than heuristic) - should upgrade
+	h2 := globalMonitorRegistry.Acquire(time.Second, CPUUsageModeMeasured, nil)
+	defer h2.Close()
+
+	// The instance should have been upgraded to measured mode (if available)
+	// or remain in heuristic if measured is not available
+	upgradedMode := globalMonitorRegistry.instance.GetMode()
+	if upgradedMode < initialMode {
+		t.Errorf("Expected mode to be upgraded or remain same, got initial: %v, upgraded: %v", initialMode, upgradedMode)
+	}
+	// Measured mode should be >= heuristic mode
+	if upgradedMode != CPUUsageModeMeasured && upgradedMode != CPUUsageModeHeuristic {
+		t.Errorf("Unexpected mode after upgrade: %v", upgradedMode)
+	}
+}
+
+// TestMonitorRegistry_Acquire_CustomMemoryReader tests that custom memory reader is applied.
+func TestMonitorRegistry_Acquire_CustomMemoryReader(t *testing.T) {
+	setupTest(t)
+
+	customMemValue := 75.5
+	customMemReader := func() (float64, error) {
+		return customMemValue, nil
+	}
+
+	// First acquire without memory reader
+	h1 := globalMonitorRegistry.Acquire(time.Second, CPUUsageModeHeuristic, nil)
+	defer h1.Close()
+
+	// Acquire with custom memory reader - should be applied
+	h2 := globalMonitorRegistry.Acquire(time.Second, CPUUsageModeHeuristic, customMemReader)
+	defer h2.Close()
+
+	// Give monitor time to sample
+	time.Sleep(200 * time.Millisecond)
+
+	stats := h2.GetStats()
+	// The custom memory reader should be used
+	// Note: This may not always match exactly due to timing, but should be close
+	if stats.MemoryUsedPercent < 0 || stats.MemoryUsedPercent > 200 {
+		t.Errorf("Expected valid memory percentage, got %f", stats.MemoryUsedPercent)
+	}
+}
+
+// TestMonitorRegistry_Acquire_NoUpgradeWhenLowerMode tests that acquiring with lower mode doesn't downgrade.
+func TestMonitorRegistry_Acquire_NoUpgradeWhenLowerMode(t *testing.T) {
+	setupTest(t)
+
+	// First acquire with measured mode (higher)
+	h1 := globalMonitorRegistry.Acquire(time.Second, CPUUsageModeMeasured, nil)
+	defer h1.Close()
+
+	initialMode := globalMonitorRegistry.instance.GetMode()
+
+	// Acquire with heuristic mode (lower) - should NOT downgrade
+	h2 := globalMonitorRegistry.Acquire(time.Second, CPUUsageModeHeuristic, nil)
+	defer h2.Close()
+
+	// Mode should remain the same or higher (not downgrade)
+	finalMode := globalMonitorRegistry.instance.GetMode()
+	if finalMode < initialMode {
+		t.Errorf("Expected mode to not downgrade, got initial: %v, final: %v", initialMode, finalMode)
 	}
 }

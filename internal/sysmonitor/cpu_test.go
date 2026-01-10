@@ -4,6 +4,8 @@ import (
 	"io/fs"
 	"testing"
 	"time"
+
+	"github.com/reugn/go-streams/internal/testutil"
 )
 
 // MockFS for the factory test
@@ -19,6 +21,9 @@ type testError struct {
 func (e *testError) Error() string {
 	return e.msg
 }
+
+// Verify that testutil.MockFileSystem implements FileSystem
+var _ FileSystem = (*testutil.MockFileSystem)(nil)
 
 func TestNewCPUSampler(t *testing.T) {
 	fs := &factoryMockFS{}
@@ -145,7 +150,7 @@ func TestProcessMemoryReaderInterface(t *testing.T) {
 // TestSamplerErrorHandling tests error conditions that work across platforms
 func TestSamplerErrorHandling(t *testing.T) {
 	// Test with mock filesystem that can simulate errors
-	mockFS := &MockFileSystem{
+	mockFS := &testutil.MockFileSystem{
 		OpenErrs: map[string]error{
 			"/proc/self/stat": &testError{msg: "mock stat error"},
 			"/proc/meminfo":   &testError{msg: "mock meminfo error"},

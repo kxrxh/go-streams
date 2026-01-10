@@ -4,19 +4,21 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/reugn/go-streams/internal/testutil"
 )
 
 func TestResourceMonitor_Stop(t *testing.T) {
 	setupTest(t)
 
-	rm := newResourceMonitor(testSampleInterval, CPUUsageModeHeuristic, nil)
+	rm := newResourceMonitor(testutil.TestSampleInterval, CPUUsageModeHeuristic, nil)
 
 	initialStats := rm.GetStats()
 	if initialStats.Timestamp.IsZero() {
 		t.Fatal("Monitor should be running and producing stats")
 	}
 
-	time.Sleep(testStopTimeout)
+	time.Sleep(testutil.TestStopTimeout)
 	statsBeforeStop := rm.GetStats()
 	if !statsBeforeStop.Timestamp.After(initialStats.Timestamp) {
 		t.Fatal("Monitor should have sampled at least once")
@@ -24,10 +26,10 @@ func TestResourceMonitor_Stop(t *testing.T) {
 
 	rm.stop()
 
-	time.Sleep(testStopTimeout)
+	time.Sleep(testutil.TestStopTimeout)
 	statsAfterStop := rm.GetStats()
 
-	if statsAfterStop.Timestamp.Sub(statsBeforeStop.Timestamp) > testStatsUpdateMargin {
+	if statsAfterStop.Timestamp.Sub(statsBeforeStop.Timestamp) > testutil.TestStatsUpdateMargin {
 		t.Error("Monitor should have stopped, stats should not update significantly")
 	}
 
@@ -116,6 +118,7 @@ func TestResourceMonitor_GetStats_NilStats(t *testing.T) {
 	}
 }
 
+// errInvalidStatsError is a simple error type for testing invalid stats.
 type errInvalidStatsError string
 
 func (e errInvalidStatsError) Error() string { return string(e) }
