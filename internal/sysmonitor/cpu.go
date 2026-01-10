@@ -8,6 +8,11 @@ import (
 // CPU usage of the current process. Returns normalized CPU usage (0-100%)
 // across all available CPU cores.
 //
+// Thread-safety: implementations keep internal cached state (e.g. last sample
+// timestamp/CPU times) and are NOT safe for concurrent use. If you need to call
+// Sample/Reset/IsInitialized from multiple goroutines, protect the sampler with
+// an external mutex.
+//
 // Platform implementations:
 //   - Linux: reads from /proc/[pid]/stat
 //   - Darwin (macOS): uses syscall.Getrusage
